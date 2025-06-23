@@ -17,13 +17,14 @@ from diffusion_policy.real_world.multi_camera_visualizer import MultiCameraVisua
 from diffusion_policy.common.replay_buffer import ReplayBuffer
 from diffusion_policy.common.cv2_util import (
     get_image_transform, optimal_row_cols)
+from diffusion_policy.real_world.robotiq_gripper import RobotiqGripper
 
 DEFAULT_OBS_KEY_MAP = {
     # robot
-    'ActualTCPPose': 'robot_eef_pose',
-    'ActualTCPSpeed': 'robot_eef_pose_vel',
-    'ActualQ': 'robot_joint',
-    'ActualQd': 'robot_joint_vel',
+    'ActualTCPPose': 'end_effector_pose',
+    'ActualTCPSpeed': 'end_effector_vel',
+    'ActualQ': 'arm_joint_pos',
+    'ActualQd': 'arm_joint_vel',
     # timestamps
     'step_idx': 'step_idx',
     'timestamp': 'timestamp'
@@ -49,16 +50,19 @@ class RealEnv:
             # robot
             tcp_offset=0.13,
             init_joints=False,
+            # gripper
+            gripper_ip="192.168.1.2",
+            gripper_port=63352,
             # video capture params
             video_capture_fps=30,
-            video_capture_resolution=(1280,720),
+            video_capture_resolution=(640,480),
             # saving params
             record_raw_video=True,
             thread_per_video=2,
             video_crf=21,
             # vis params
             enable_multi_cam_vis=True,
-            multi_cam_vis_resolution=(1280,720),
+            multi_cam_vis_resolution=(640,480),
             # shared memory
             shm_manager=None
             ):
@@ -151,7 +155,7 @@ class RealEnv:
             )
 
         cube_diag = np.linalg.norm([1,1,1])
-        j_init = np.array([0,-90,-90,-90,90,0]) / 180 * np.pi
+        j_init = np.array([0,-90,90,-90,-90,0]) / 180 * np.pi
         if not init_joints:
             j_init = None
 
@@ -160,7 +164,7 @@ class RealEnv:
             robot_ip=robot_ip,
             frequency=125, # UR5 CB3 RTDE
             lookahead_time=0.1,
-            gain=300,
+            gain=100,
             max_pos_speed=max_pos_speed*cube_diag,
             max_rot_speed=max_rot_speed*cube_diag,
             launch_timeout=3,
@@ -174,8 +178,16 @@ class RealEnv:
             receive_keys=None,
             get_max_k=max_obs_buffer_size
             )
+        
+        # Initialize gripper
+        gripper = RobotiqGripper()
+        gripper.connect(gripper_ip, gripper_port)
+        gripper.activate()
+
         self.realsense = realsense
         self.robot = robot
+        self.gripper = gripper
+        self.gripper_state = 'open'  # Track gripper state
         self.multi_cam_vis = multi_cam_vis
         self.video_capture_fps = video_capture_fps
         self.frequency = frequency
@@ -309,7 +321,19 @@ class RealEnv:
     def exec_actions(self, 
             actions: np.ndarray, 
             timestamps: np.ndarray, 
-            stages: Optional[np.ndarray]=None):
+            stages: Optional[np.ndarray]=None,
+            max_joint_diff: float = 1.0):
+        """
+        Execute unified robot actions including gripper control.
+        
+        Args:
+            actions: Unified robot actions (shape: N x 7) where:
+                - actions[:, :6] = Robot joint positions (in radians)
+                - actions[:, 6] = Gripper position (0=closed, 1=open)
+            timestamps: Action timestamps
+            stages: Optional stage information
+            max_joint_diff: Maximum allowed difference between commanded and current joint positions (in radians)
+        """
         assert self.is_ready
         if not isinstance(actions, np.ndarray):
             actions = np.array(actions)
@@ -320,24 +344,54 @@ class RealEnv:
         elif not isinstance(stages, np.ndarray):
             stages = np.array(stages, dtype=np.int64)
 
-        # convert action to pose
+        # Validate action shape
+        if actions.shape[-1] != 7:
+            raise ValueError(f"Actions must have 7 dimensions (6 joints + 1 gripper), got shape {actions.shape}")
+
+        # Separate joint and gripper actions
+        joint_actions = actions[:, :6]
+        gripper_actions = actions[:, 6]
+
+        # convert action to joint positions
         receive_time = time.time()
         is_new = timestamps > receive_time
+        new_joint_actions = joint_actions[is_new]
+        new_gripper_actions = gripper_actions[is_new]
         new_actions = actions[is_new]
         new_timestamps = timestamps[is_new]
         new_stages = stages[is_new]
 
-        # schedule waypoints
-        for i in range(len(new_actions)):
-            self.robot.schedule_waypoint(
-                pose=new_actions[i],
-                target_time=new_timestamps[i]
+        # Check joint position differences for new actions
+        if len(new_joint_actions) > 0:
+            current_joints = self.robot.get_state()['ActualQ']
+            # Only check the latest action that will be executed
+            latest_joint_action = new_joint_actions[-1]
+            joint_diff = np.abs(latest_joint_action - current_joints)
+            max_diff = np.max(joint_diff)
+            if max_diff > max_joint_diff:
+                raise ValueError(
+                    f"Joint position difference too large: {max_diff:.4f} rad > {max_joint_diff} rad. "
+                    f"Action joints: {latest_joint_action}, Current joints: {current_joints}"
+                )
+
+        # Handle gripper commands
+        if len(new_gripper_actions) > 0:
+            latest_gripper_action = new_gripper_actions[-1]
+            # Convert gripper action: <0 is closed, >=0 is open
+            should_close = latest_gripper_action < 0
+            self.set_gripper(should_close)
+
+        # schedule waypoints for joint control
+        for i in range(len(new_joint_actions)):
+            self.robot.servoJ(
+                joints=new_joint_actions[i],
+                duration=1.0
             )
         
-        # record actions
+        # record unified actions
         if self.action_accumulator is not None:
             self.action_accumulator.put(
-                new_actions,
+                new_actions,  # Store the full 7D actions
                 new_timestamps
             )
         if self.stage_accumulator is not None:
@@ -433,3 +487,21 @@ class RealEnv:
             shutil.rmtree(str(this_video_dir))
         print(f'Episode {episode_id} dropped!')
 
+    def open_gripper(self):
+        """Opens the gripper."""
+        if self.gripper_state != 'open':
+            self.gripper.move(self.gripper.get_open_position(), 255, 255)
+            self.gripper_state = 'open'
+
+    def close_gripper(self):
+        """Closes the gripper."""
+        if self.gripper_state != 'closed':
+            self.gripper.move(self.gripper.get_closed_position(), 255, 255)
+            self.gripper_state = 'closed'
+
+    def set_gripper(self, should_close):
+        """Sets the gripper state based on boolean input."""
+        if should_close:
+            self.close_gripper()
+        else:
+            self.open_gripper()

@@ -17,6 +17,7 @@ class Command(enum.Enum):
     STOP = 0
     SERVOL = 1
     SCHEDULE_WAYPOINT = 2
+    SERVOJ = 3  # Joint position control
 
 
 class RTDEInterpolationController(mp.Process):
@@ -97,6 +98,7 @@ class RTDEInterpolationController(mp.Process):
         example = {
             'cmd': Command.SERVOL.value,
             'target_pose': np.zeros((6,), dtype=np.float64),
+            'target_joints': np.zeros((6,), dtype=np.float64),
             'duration': 0.0,
             'target_time': 0.0
         }
@@ -189,6 +191,26 @@ class RTDEInterpolationController(mp.Process):
         }
         self.input_queue.put(message)
     
+    def servoJ(self, joints, duration=0.1):
+        """
+        Send joint position command to the robot.
+        
+        Args:
+            joints: Array of 6 joint positions in radians
+            duration: desired time to reach joint positions
+        """
+        assert self.is_alive()
+        assert(duration >= (1/self.frequency))
+        joints = np.array(joints)
+        assert joints.shape == (6,)
+
+        message = {
+            'cmd': Command.SERVOJ.value,
+            'target_joints': joints,
+            'duration': duration
+        }
+        self.input_queue.put(message)
+
     def schedule_waypoint(self, pose, target_time):
         assert target_time > time.time()
         pose = np.array(pose)
@@ -243,6 +265,7 @@ class RTDEInterpolationController(mp.Process):
             # main loop
             dt = 1. / self.frequency
             curr_pose = rtde_r.getActualTCPPose()
+            curr_joints = rtde_r.getActualQ()
             # use monotonic time to make sure the control loop never go backward
             curr_t = time.monotonic()
             last_waypoint_time = curr_t
@@ -251,6 +274,10 @@ class RTDEInterpolationController(mp.Process):
                 poses=[curr_pose]
             )
             
+            # Track current control mode
+            control_mode = 'joint'  # or 'pose'
+            current_target_joints = curr_joints
+
             iter_idx = 0
             keep_running = True
             while keep_running:
@@ -259,17 +286,25 @@ class RTDEInterpolationController(mp.Process):
 
                 # send command to robot
                 t_now = time.monotonic()
-                # diff = t_now - pose_interp.times[-1]
-                # if diff > 0:
-                #     print('extrapolate', diff)
-                pose_command = pose_interp(t_now)
-                vel = 0.5
-                acc = 0.5
-                assert rtde_c.servoL(pose_command, 
-                    vel, acc, # dummy, not used by ur5
-                    dt, 
-                    self.lookahead_time, 
-                    self.gain)
+                
+                # Execute control based on mode
+                if control_mode == 'pose':
+                    pose_command = pose_interp(t_now)
+                    vel = 0.5
+                    acc = 0.5
+                    assert rtde_c.servoL(pose_command, 
+                        vel, acc, # dummy, not used by ur5
+                        dt, 
+                        self.lookahead_time, 
+                        self.gain)
+                else:  # joint control mode
+                    vel = 0.5
+                    acc = 0.5
+                    assert rtde_c.servoJ(current_target_joints,
+                        vel, acc,  # velocity and acceleration scaling
+                        dt,  # time since last servo command
+                        self.lookahead_time,  # lookahead time for smoothing
+                        self.gain)  # gain for following target position
                 
                 # update robot state
                 state = dict()
@@ -297,6 +332,8 @@ class RTDEInterpolationController(mp.Process):
                         # stop immediately, ignore later commands
                         break
                     elif cmd == Command.SERVOL.value:
+                        # Switch to pose control mode
+                        control_mode = 'pose'
                         # since curr_pose always lag behind curr_target_pose
                         # if we start the next interpolation with curr_pose
                         # the command robot receive will have discontinouity 
@@ -316,7 +353,18 @@ class RTDEInterpolationController(mp.Process):
                         if self.verbose:
                             print("[RTDEPositionalController] New pose target:{} duration:{}s".format(
                                 target_pose, duration))
+                    elif cmd == Command.SERVOJ.value:
+                        # Switch to joint control mode
+                        control_mode = 'joint'
+                        # Update target joint positions
+                        current_target_joints = command['target_joints']
+                        duration = float(command['duration'])
+                        if self.verbose:
+                            print("[RTDEPositionalController] New joint target:{} duration:{}s".format(
+                                current_target_joints, duration))
                     elif cmd == Command.SCHEDULE_WAYPOINT.value:
+                        # Switch to pose control mode
+                        control_mode = 'pose'
                         target_pose = command['target_pose']
                         target_time = float(command['target_time'])
                         # translate global time to monotonic time

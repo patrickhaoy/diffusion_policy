@@ -3,9 +3,12 @@ Usage:
 (robodiff)$ python demo_real_robot.py -o <demo_save_dir> --robot_ip <ip_of_ur5>
 
 Robot movement:
-Move your SpaceMouse to move the robot EEF (locked in xy plane).
-Press SpaceMouse right button to unlock z axis.
-Press SpaceMouse left button to enable rotation axes.
+Control robot joint positions using Mello device.
+Gripper control is handled through Mello's 7th axis.
+
+Debug mode (--debug flag):
+When debug flag is set, uses fixed joint positions instead of Mello device.
+The robot will move to a "home" position and stay there.
 
 Recording control:
 Click the opencv window (make sure it's in focus).
@@ -21,31 +24,36 @@ from multiprocessing.managers import SharedMemoryManager
 import click
 import cv2
 import numpy as np
-import scipy.spatial.transform as st
 from diffusion_policy.real_world.real_env import RealEnv
-from diffusion_policy.real_world.spacemouse_shared_memory import Spacemouse
 from diffusion_policy.common.precise_sleep import precise_wait
 from diffusion_policy.real_world.keystroke_counter import (
     KeystrokeCounter, Key, KeyCode
 )
+from diffusion_policy.real_world.mello_teleop import MelloTeleopInterface, DummyMelloTeleopInterface
 
 @click.command()
 @click.option('--output', '-o', required=True, help="Directory to save demonstration dataset.")
 @click.option('--robot_ip', '-ri', required=True, help="UR5's IP address e.g. 192.168.0.204")
+@click.option('--mello_port', '-mp', default='/dev/serial/by-id/usb-M5Stack_Technology_Co.__Ltd_M5Stack_UiFlow_2.0_24587ce945900000-if00', help="Mello device serial port")
 @click.option('--vis_camera_idx', default=0, type=int, help="Which RealSense camera to visualize.")
 @click.option('--init_joints', '-j', is_flag=True, default=False, help="Whether to initialize robot joint configuration in the beginning.")
-@click.option('--frequency', '-f', default=10, type=float, help="Control frequency in Hz.")
-@click.option('--command_latency', '-cl', default=0.01, type=float, help="Latency between receiving SapceMouse command to executing on Robot in Sec.")
-def main(output, robot_ip, vis_camera_idx, init_joints, frequency, command_latency):
+@click.option('--frequency', '-f', default=15, type=float, help="Control frequency in Hz.")
+@click.option('--command_latency', '-cl', default=0.01, type=float, help="Latency between receiving command to executing on Robot in Sec.")
+@click.option('--debug', is_flag=True, help="Use dummy Mello interface with fixed joint positions for testing.")
+def main(output, robot_ip, mello_port, vis_camera_idx, init_joints, frequency, command_latency, debug):
     dt = 1/frequency
     with SharedMemoryManager() as shm_manager:
+        # Choose between real and dummy Mello interface
+        MelloInterface = DummyMelloTeleopInterface if debug else MelloTeleopInterface
+        mello_kwargs = {} if debug else {'port': mello_port}
+        
         with KeystrokeCounter() as key_counter, \
-            Spacemouse(shm_manager=shm_manager) as sm, \
+            MelloInterface(**mello_kwargs) as mello, \
             RealEnv(
                 output_dir=output, 
                 robot_ip=robot_ip, 
                 # recording resolution
-                obs_image_resolution=(1280,720),
+                obs_image_resolution=(640,480),
                 frequency=frequency,
                 init_joints=init_joints,
                 enable_multi_cam_vis=True,
@@ -59,14 +67,12 @@ def main(output, robot_ip, vis_camera_idx, init_joints, frequency, command_laten
             cv2.setNumThreads(1)
 
             # realsense exposure
-            env.realsense.set_exposure(exposure=120, gain=0)
+            env.realsense.set_exposure(exposure=500, gain=0)
             # realsense white balance
-            env.realsense.set_white_balance(white_balance=5900)
+            env.realsense.set_white_balance(white_balance=2000)
 
             time.sleep(1.0)
             print('Ready!')
-            state = env.get_robot_state()
-            target_pose = state['TargetTCPPose']
             t_start = time.monotonic()
             iter_idx = 0
             stop = False
@@ -113,6 +119,8 @@ def main(output, robot_ip, vis_camera_idx, init_joints, frequency, command_laten
                 text = f'Episode: {episode_id}, Stage: {stage}'
                 if is_recording:
                     text += ', Recording!'
+                if debug:
+                    text += ' (DEBUG MODE)'
                 cv2.putText(
                     vis_img,
                     text,
@@ -127,29 +135,16 @@ def main(output, robot_ip, vis_camera_idx, init_joints, frequency, command_laten
                 cv2.pollKey()
 
                 precise_wait(t_sample)
-                # get teleop command
-                sm_state = sm.get_motion_state_transformed()
-                # print(sm_state)
-                dpos = sm_state[:3] * (env.max_pos_speed / frequency)
-                drot_xyz = sm_state[3:] * (env.max_rot_speed / frequency)
                 
-                if not sm.is_button_pressed(0):
-                    # translation mode
-                    drot_xyz[:] = 0
-                else:
-                    dpos[:] = 0
-                if not sm.is_button_pressed(1):
-                    # 2D translation mode
-                    dpos[2] = 0    
-
-                drot = st.Rotation.from_euler('xyz', drot_xyz)
-                target_pose[:3] += dpos
-                target_pose[3:] = (drot * st.Rotation.from_rotvec(
-                    target_pose[3:])).as_rotvec()
+                # Get latest Mello values
+                mello_values = mello.get_latest_values()
+                joints = mello_values[:6]  # First 6 values are joints
+                gripper_command = mello_values[6]  # 7th value is gripper (1 for open, -1 for closed)
+                unified_action = np.concatenate([joints, [gripper_command]])
 
                 # execute teleop command
                 env.exec_actions(
-                    actions=[target_pose], 
+                    actions=[unified_action], 
                     timestamps=[t_command_target-time.monotonic()+time.time()],
                     stages=[stage])
                 precise_wait(t_cycle_end)

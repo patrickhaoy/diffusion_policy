@@ -16,7 +16,7 @@ def test():
     serials = SingleRealsense.get_connected_devices_serial()
     # import pdb; pdb.set_trace()
     serial = serials[0]
-    config = json.load(open('/home/cchi/dev/diffusion_policy/diffusion_policy/real_world/realsense_config/415_high_accuracy_mode.json', 'r'))
+    # config = json.load(open('/home/cchi/dev/diffusion_policy/diffusion_policy/real_world/realsense_config/415_high_accuracy_mode.json', 'r'))
 
     def transform(data):
         color = data['color']
@@ -33,7 +33,7 @@ def test():
         with SingleRealsense(
             shm_manager=shm_manager,
             serial_number=serial,
-            resolution=(1280,720),
+            resolution=(640,480),
             # resolution=(960,540),
             # resolution=(640,480),
             capture_fps=30,
@@ -46,7 +46,8 @@ def test():
             # verbose=True
             ) as realsense:
             cv2.setNumThreads(1) 
-            realsense.set_exposure(exposure=150, gain=5)
+            realsense.set_exposure(exposure=500, gain=0)
+            realsense.set_white_balance(white_balance=2000)
             intr = realsense.get_intrinsics()
             print(intr)
 
@@ -79,8 +80,8 @@ def test():
                 #     realsense.stop_recording()
                 
                 time.sleep(1/60)
-                if time.time() > (rec_start_time + 20.0):
-                    break
+                # if time.time() > (rec_start_time + 20.0):
+                #     break
 
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@ class MultiRealsense:
     def __init__(self,
         serial_numbers: Optional[List[str]]=None,
         shm_manager: Optional[SharedMemoryManager]=None,
-        resolution=(1280,720),
+        resolution=(640,480),
         capture_fps=30,
         put_fps=None,
         put_downsample=True,
