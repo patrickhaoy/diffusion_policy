@@ -3,11 +3,15 @@ Usage:
 (robodiff)$ python demo_real_robot.py -o <demo_save_dir> --robot_ip <ip_of_ur5>
 
 Robot movement:
-Control robot joint positions using Mello device.
-Gripper control is handled through Mello's 7th axis.
+Control robot joint positions using Mello or Gello device.
+Gripper control is handled through device's 7th axis.
+
+Device options:
+--device mello: Use Mello device (default)
+--device gello: Use Gello device
 
 Debug mode (--debug flag):
-When debug flag is set, uses fixed joint positions instead of Mello device.
+When debug flag is set, uses fixed joint positions instead of actual device.
 The robot will move to a "home" position and stay there.
 
 Recording control:
@@ -30,28 +34,40 @@ from diffusion_policy.real_world.keystroke_counter import (
     KeystrokeCounter, Key, KeyCode
 )
 from diffusion_policy.real_world.mello_teleop import MelloTeleopInterface, DummyMelloTeleopInterface
+from diffusion_policy.real_world.gello_teleop import GelloTeleopInterface, DummyGelloTeleopInterface
 
 @click.command()
 @click.option('--output', '-o', required=True, help="Directory to save demonstration dataset.")
 @click.option('--robot_ip', '-ri', required=True, help="UR5's IP address e.g. 192.168.0.204")
+@click.option('--device', '-d', default='mello', type=click.Choice(['mello', 'gello']), help="Teleoperation device to use")
 @click.option('--mello_port', '-mp', default='/dev/serial/by-id/usb-M5Stack_Technology_Co.__Ltd_M5Stack_UiFlow_2.0_24587ce945900000-if00', help="Mello device serial port")
+@click.option('--gello_port', '-gp', default=None, help="Gello device serial port (auto-detected if not specified)")
 @click.option('--vis_camera_idx', default=0, type=int, help="Which RealSense camera to visualize.")
 @click.option('--init_joints', '-j', is_flag=True, default=False, help="Whether to initialize robot joint configuration in the beginning.")
 @click.option('--frequency', '-f', default=15, type=float, help="Control frequency in Hz.")
 @click.option('--command_latency', '-cl', default=0.01, type=float, help="Latency between receiving command to executing on Robot in Sec.")
-@click.option('--debug', is_flag=True, help="Use dummy Mello interface with fixed joint positions for testing.")
-def main(output, robot_ip, mello_port, vis_camera_idx, init_joints, frequency, command_latency, debug):
+@click.option('--use_cameras', '-uc', default=True, type=bool, help="Whether to use RealSense cameras (True/False).")
+@click.option('--debug', is_flag=True, help="Use dummy interface with fixed joint positions for testing.")
+def main(output, robot_ip, device, mello_port, gello_port, vis_camera_idx, init_joints, frequency, command_latency, use_cameras, debug):
     dt = 1/frequency
+    
     with SharedMemoryManager() as shm_manager:
-        # Choose between real and dummy Mello interface
-        MelloInterface = DummyMelloTeleopInterface if debug else MelloTeleopInterface
-        mello_kwargs = {} if debug else {'port': mello_port}
+        # Choose between real and dummy interfaces based on device type
+        if device == 'mello':
+            Interface = DummyMelloTeleopInterface if debug else MelloTeleopInterface
+            interface_kwargs = {} if debug else {'port': mello_port}
+        elif device == 'gello':
+            Interface = DummyGelloTeleopInterface if debug else GelloTeleopInterface
+            interface_kwargs = {} if debug else {'port': gello_port}
+        else:
+            raise ValueError(f"Unknown device type: {device}")
         
         with KeystrokeCounter() as key_counter, \
-            MelloInterface(**mello_kwargs) as mello, \
+            Interface(**interface_kwargs) as teleop_device, \
             RealEnv(
                 output_dir=output, 
                 robot_ip=robot_ip, 
+                use_cameras=use_cameras,
                 # recording resolution
                 obs_image_resolution=(640,480),
                 frequency=frequency,
@@ -66,13 +82,14 @@ def main(output, robot_ip, mello_port, vis_camera_idx, init_joints, frequency, c
             ) as env:
             cv2.setNumThreads(1)
 
-            # realsense exposure
-            env.realsense.set_exposure(exposure=500, gain=0)
-            # realsense white balance
-            env.realsense.set_white_balance(white_balance=2000)
+            if use_cameras:
+                # realsense exposure
+                env.realsense.set_exposure(exposure=500, gain=0)
+                # realsense white balance
+                env.realsense.set_white_balance(white_balance=2000)
 
             time.sleep(1.0)
-            print('Ready!')
+            print(f'Ready! Using {device.upper()} device')
             t_start = time.monotonic()
             iter_idx = 0
             stop = False
@@ -114,32 +131,36 @@ def main(output, robot_ip, mello_port, vis_camera_idx, init_joints, frequency, c
                 stage = key_counter[Key.space]
 
                 # visualize
-                vis_img = obs[f'camera_{vis_camera_idx}'][-1,:,:,::-1].copy()
-                episode_id = env.replay_buffer.n_episodes
-                text = f'Episode: {episode_id}, Stage: {stage}'
-                if is_recording:
-                    text += ', Recording!'
-                if debug:
-                    text += ' (DEBUG MODE)'
-                cv2.putText(
-                    vis_img,
-                    text,
-                    (10,30),
-                    fontFace=cv2.FONT_HERSHEY_SIMPLEX,
-                    fontScale=1,
-                    thickness=2,
-                    color=(255,255,255)
-                )
+                if use_cameras:
+                    vis_img = obs[f'camera_{vis_camera_idx}'][-1,:,:,::-1].copy()
+                    episode_id = env.replay_buffer.n_episodes
+                    text = f'Episode: {episode_id}, Stage: {stage}, Device: {device.upper()}'
+                    if is_recording:
+                        text += ', Recording!'
+                    if debug:
+                        text += ' (DEBUG MODE)'
+                    cv2.putText(
+                        vis_img,
+                        text,
+                        (10,30),
+                        fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+                        fontScale=1,
+                        thickness=2,
+                        color=(255,255,255)
+                    )
 
-                cv2.imshow('default', vis_img)
-                cv2.pollKey()
+                    cv2.imshow('default', vis_img)
+                    cv2.pollKey()   
 
                 precise_wait(t_sample)
                 
-                # Get latest Mello values
-                mello_values = mello.get_latest_values()
-                joints = mello_values[:6]  # First 6 values are joints
-                gripper_command = mello_values[6]  # 7th value is gripper (1 for open, -1 for closed)
+                # Get latest device values
+                device_values = teleop_device.get_latest_values()
+                
+                # Handle different joint configurations
+                # 6 joints + 1 gripper
+                joints = device_values[:6]  # First 6 values are joints
+                gripper_command = device_values[6]  # 7th value is gripper (1 for open, -1 for closed)
                 unified_action = np.concatenate([joints, [gripper_command]])
 
                 # execute teleop command
