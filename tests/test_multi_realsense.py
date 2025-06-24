@@ -13,7 +13,7 @@ from diffusion_policy.real_world.multi_realsense import MultiRealsense
 from diffusion_policy.real_world.video_recorder import VideoRecorder
 
 def test():
-    config = json.load(open('/home/cchi/dev/diffusion_policy/diffusion_policy/real_world/realsense_config/415_high_accuracy_mode.json', 'r'))
+    # config = json.load(open('/home/cchi/dev/diffusion_policy/diffusion_policy/real_world/realsense_config/415_high_accuracy_mode.json', 'r'))
 
     def transform(data):
         color = data['color']
@@ -26,8 +26,8 @@ def test():
 
     from diffusion_policy.common.cv2_util import get_image_transform
     color_transform = get_image_transform(
-        input_res=(1280,720),
-        output_res=(640,480), 
+        input_res=(640,480),
+        output_res=(224,224), 
         bgr_to_rgb=False)
     def transform(data):
         data['color'] = color_transform(data['color'])
@@ -41,7 +41,7 @@ def test():
     )
 
     with MultiRealsense(
-            resolution=(1280,720),
+            resolution=(640,480),
             capture_fps=30,
             record_fps=15,
             enable_color=True,
@@ -51,7 +51,8 @@ def test():
             # video_recorder=video_recorder,
             verbose=True
         ) as realsense:
-        realsense.set_exposure(exposure=150, gain=5)
+        realsense.set_exposure(exposure=500, gain=0)
+        realsense.set_white_balance(white_balance=2000)
         intr = realsense.get_intrinsics()
         print(intr)
 
@@ -62,21 +63,26 @@ def test():
 
         out = None
         vis_img = None
+        open_windows = set()
         while True:
             out = realsense.get(out=out)
 
-            # bgr = out['color']
-            # print(bgr.shape)
-            # vis_img = np.concatenate(list(bgr), axis=0, out=vis_img)
-            # cv2.imshow('default', vis_img)
-            # key = cv2.pollKey()
-            # if key == ord('q'):
-            #     break
+            # Visualize each camera image in 'out' using fixed window names
+            current_windows = set()
+            for cam_idx, cam_data in out.items():
+                img = cam_data['color']
+                win_name = f'Camera {cam_idx}'
+                cv2.imshow(win_name, img)
+                current_windows.add(win_name)
+            # Close windows for cameras that are no longer present
+            for win_name in open_windows - current_windows:
+                cv2.destroyWindow(win_name)
+            open_windows = current_windows
 
-            time.sleep(1/60)
-            if time.time() > (rec_start_time + 20.0):
+            # Wait for key press; close on 'q'
+            if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
-
+        cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     test()

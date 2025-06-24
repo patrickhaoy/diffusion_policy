@@ -2,6 +2,8 @@ from typing import Tuple
 import math
 import cv2
 import numpy as np
+import torch
+import torch.nn.functional as F
 
 def draw_reticle(img, u, v, label_color):
     """
@@ -81,43 +83,87 @@ def draw_text(
         uv_top_left += [0, h * line_spacing]
 
 
+# def get_image_transform(
+#         input_res: Tuple[int,int]=(1280,720), 
+#         output_res: Tuple[int,int]=(640,480), 
+#         bgr_to_rgb: bool=False):
+
+#     iw, ih = input_res
+#     ow, oh = output_res
+#     rw, rh = None, None
+#     interp_method = cv2.INTER_AREA
+
+#     if (iw/ih) >= (ow/oh):
+#         # input is wider
+#         rh = oh
+#         rw = math.ceil(rh / ih * iw)
+#         if oh > ih:
+#             interp_method = cv2.INTER_LINEAR
+#     else:
+#         rw = ow
+#         rh = math.ceil(rw / iw * ih)
+#         if ow > iw:
+#             interp_method = cv2.INTER_LINEAR
+    
+#     w_slice_start = (rw - ow) // 2
+#     w_slice = slice(w_slice_start, w_slice_start + ow)
+#     h_slice_start = (rh - oh) // 2
+#     h_slice = slice(h_slice_start, h_slice_start + oh)
+#     c_slice = slice(None)
+#     if bgr_to_rgb:
+#         c_slice = slice(None, None, -1)
+
+#     def transform(img: np.ndarray):
+#         assert img.shape == ((ih,iw,3))
+#         # resize
+#         img = cv2.resize(img, (rw, rh), interpolation=interp_method)
+#         # crop
+#         img = img[h_slice, w_slice, c_slice]
+#         return img
+#     return transform
+
 def get_image_transform(
-        input_res: Tuple[int,int]=(1280,720), 
-        output_res: Tuple[int,int]=(640,480), 
-        bgr_to_rgb: bool=False):
+        input_res: Tuple[int, int] = (1280, 720),
+        output_res: Tuple[int, int] = (640, 480),
+        bgr_to_rgb: bool = False):
 
     iw, ih = input_res
     ow, oh = output_res
-    rw, rh = None, None
-    interp_method = cv2.INTER_AREA
 
-    if (iw/ih) >= (ow/oh):
-        # input is wider
-        rh = oh
-        rw = math.ceil(rh / ih * iw)
-        if oh > ih:
-            interp_method = cv2.INTER_LINEAR
-    else:
-        rw = ow
-        rh = math.ceil(rw / iw * ih)
-        if ow > iw:
-            interp_method = cv2.INTER_LINEAR
-    
-    w_slice_start = (rw - ow) // 2
-    w_slice = slice(w_slice_start, w_slice_start + ow)
-    h_slice_start = (rh - oh) // 2
-    h_slice = slice(h_slice_start, h_slice_start + oh)
-    c_slice = slice(None)
-    if bgr_to_rgb:
-        c_slice = slice(None, None, -1)
+    def transform(img):
+        is_numpy = isinstance(img, np.ndarray)
 
-    def transform(img: np.ndarray):
-        assert img.shape == ((ih,iw,3))
-        # resize
-        img = cv2.resize(img, (rw, rh), interpolation=interp_method)
-        # crop
-        img = img[h_slice, w_slice, c_slice]
-        return img
+        # Check input dimensions
+        if is_numpy:
+            assert img.shape == (ih, iw, 3)
+            img_tensor = torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0).float()
+            img_tensor /= 255.0 if img.dtype == np.uint8 else 1.0
+        else:
+            assert isinstance(img, torch.Tensor)
+            assert img.shape == (ih, iw, 3)
+            img_tensor = img.permute(2, 0, 1).unsqueeze(0)
+
+        if bgr_to_rgb:
+            img_tensor = img_tensor[:, [2, 1, 0], :, :]
+
+        # Resize image
+        resized_img = F.interpolate(
+            img_tensor,
+            size=(oh, ow),
+            mode="bilinear",
+            align_corners=False,
+            antialias=True
+        )
+
+        # Convert back to original format
+        resized_img = resized_img.squeeze(0).permute(1, 2, 0)
+
+        if is_numpy:
+            resized_img = resized_img.cpu().numpy()
+            resized_img = (resized_img * 255).astype(np.uint8) if img.dtype == np.uint8 else resized_img
+
+        return resized_img
+
     return transform
 
 def optimal_row_cols(
