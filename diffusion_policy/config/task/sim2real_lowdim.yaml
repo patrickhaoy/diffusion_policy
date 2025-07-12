@@ -1,0 +1,24 @@
+name: sim2real_lowdim
+
+obs_dim: 41
+action_dim: 7
+keypoint_dim: 0
+
+obs_keys: &obs_keys ['arm_joint_pos', 'end_effector_pose', 'fixed_asset_pose', 
+                     'held_asset_in_fixed_asset_frame', 'held_asset_pose', 
+                     'last_arm_action', 'last_gripper_action']
+task_name: &task_name sim2real_lowdim
+
+env_runner:
+  _target_: diffusion_policy.env_runner.sim2real_lowdim_runner.Sim2RealLowdimRunner
+
+dataset:
+  _target_: diffusion_policy.dataset.sim2real_state_dataset.Sim2RealStateDataset
+  zarr_path: data/sim2real_lowdim.zarr/data
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps}-1+${n_latency_steps}'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+  obs_keys: *obs_keys
+  action_key: actions
+  seed: 42
+  val_ratio: 0.02
