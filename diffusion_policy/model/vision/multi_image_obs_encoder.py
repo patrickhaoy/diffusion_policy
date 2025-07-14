@@ -1,19 +1,67 @@
-from typing import Dict, Tuple, Union
+from typing import Union
 import copy
 import torch
 import torch.nn as nn
 import torchvision
+import torchvision.transforms as T
 from diffusion_policy.model.vision.crop_randomizer import CropRandomizer
 from diffusion_policy.model.common.module_attr_mixin import ModuleAttrMixin
-from diffusion_policy.common.pytorch_util import dict_apply, replace_submodules
+from diffusion_policy.common.pytorch_util import replace_submodules
+import matplotlib.pyplot as plt
+
+
+# Custom GaussianNoise transform
+class GaussianNoise(nn.Module):
+    def __init__(self, std: float = 0.05):
+        super().__init__()
+        self.std = std
+
+    def forward(self, img: torch.Tensor) -> torch.Tensor:
+        if self.std == 0:
+            return img
+        noise = torch.randn_like(img) * self.std
+        return img + noise
+
+
+class TrainingOnlyWrapper(nn.Module):
+    def __init__(self, transforms: list[nn.Module], debug: bool = False):
+        super().__init__()
+        self.transforms = nn.ModuleList(transforms)
+        self.debug = debug
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if not self.training or len(self.transforms) == 0:
+            return x
+        out = x
+        for i, t in enumerate(self.transforms):
+            out = t(out)
+            if self.debug:
+                # Only plot for the first image in the batch
+                img = out[0]
+                # If CHW, move to HWC
+                if img.dim() == 3 and img.shape[0] in [1, 3]:
+                    img_np = img.detach().cpu().numpy()
+                    img_np = img_np.transpose(1, 2, 0)
+                else:
+                    img_np = img.detach().cpu().numpy()
+                # Clamp and convert to uint8 for display
+                img_np = img_np.clip(0, 1)
+                if img_np.shape[2] == 1:
+                    img_np = img_np.squeeze(-1)
+                plt.figure()
+                plt.title(f"After transform {i}: {t.__class__.__name__}")
+                plt.imshow(img_np)
+                plt.axis('off')
+                plt.show()
+        return out
 
 
 class MultiImageObsEncoder(ModuleAttrMixin):
     def __init__(self,
             shape_meta: dict,
-            rgb_model: Union[nn.Module, Dict[str,nn.Module]],
-            resize_shape: Union[Tuple[int,int], Dict[str,tuple], None]=None,
-            crop_shape: Union[Tuple[int,int], Dict[str,tuple], None]=None,
+            rgb_model: Union[nn.Module, dict[str,nn.Module]],
+            resize_shape: Union[tuple[int,int], dict[str,tuple], None]=None,
+            crop_shape: Union[tuple[int,int], dict[str,tuple], None]=None,
             random_crop: bool=True,
             # replace BatchNorm with GroupNorm
             use_group_norm: bool=False,
@@ -21,7 +69,8 @@ class MultiImageObsEncoder(ModuleAttrMixin):
             share_rgb_model: bool=False,
             # renormalize rgb input with imagenet normalization
             # assuming input in [0,1]
-            imagenet_norm: bool=False
+            imagenet_norm: bool=False,
+            extra_randomizations=None
         ):
         """
         Assumes rgb input: B,C,H,W
@@ -101,13 +150,30 @@ class MultiImageObsEncoder(ModuleAttrMixin):
                         this_normalizer = torchvision.transforms.CenterCrop(
                             size=(h,w)
                         )
+                # configure extra randomizations
+                randomization_list = []
+                if extra_randomizations is not None:
+                    for t in extra_randomizations:
+                        name = t['name']
+                        params = t['params']
+                        if name == 'ColorJitter':
+                            randomization_list.append(T.ColorJitter(**params))
+                        elif name == 'GaussianBlur':
+                            randomization_list.append(T.GaussianBlur(**params))
+                        elif name == 'RandomGrayscale':
+                            randomization_list.append(T.RandomGrayscale(**params))
+                        elif name == 'GaussianNoise':
+                            randomization_list.append(GaussianNoise(**params))
+                        else:
+                            raise ValueError(f"Unknown transform: {name}")
+                randomization_module = TrainingOnlyWrapper(randomization_list, debug=False) if randomization_list else nn.Identity()
                 # configure normalizer
                 this_normalizer = nn.Identity()
                 if imagenet_norm:
                     this_normalizer = torchvision.transforms.Normalize(
                         mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
                 
-                this_transform = nn.Sequential(this_resizer, this_randomizer, this_normalizer)
+                this_transform = nn.Sequential(this_resizer, this_randomizer, randomization_module, this_normalizer)
                 key_transform_map[key] = this_transform
             elif type == 'low_dim':
                 low_dim_keys.append(key)
