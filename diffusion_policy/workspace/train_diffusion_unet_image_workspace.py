@@ -18,9 +18,10 @@ import random
 import wandb
 import tqdm
 import numpy as np
-import shutil
+
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
-from diffusion_policy.policy.diffusion_unet_image_policy import DiffusionUnetImagePolicy
+from diffusion_policy.policy.diffusion_unet_image_policy import (
+    DiffusionUnetImagePolicy)
 from diffusion_policy.dataset.base_dataset import BaseImageDataset
 from diffusion_policy.env_runner.base_image_runner import BaseImageRunner
 from diffusion_policy.common.checkpoint_util import TopKCheckpointManager
@@ -30,6 +31,7 @@ from diffusion_policy.model.diffusion.ema_model import EMAModel
 from diffusion_policy.model.common.lr_scheduler import get_scheduler
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
+
 
 class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
     include_keys = ['global_step', 'epoch']
@@ -44,7 +46,8 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
         random.seed(seed)
 
         # configure model
-        self.model: DiffusionUnetImagePolicy = hydra.utils.instantiate(cfg.policy)
+        self.model: DiffusionUnetImagePolicy = (
+            hydra.utils.instantiate(cfg.policy))
 
         self.ema_model: DiffusionUnetImagePolicy = None
         if cfg.training.use_ema:

@@ -1,0 +1,41 @@
+name: sim2real_image
+
+shape_meta: &shape_meta
+  obs:
+    front_rgb:
+      shape: [3, 224, 224]
+      type: rgb
+    side_rgb:
+      shape: [3, 224, 224]
+      type: rgb
+    wrist_rgb:
+      shape: [3, 224, 224]
+      type: rgb
+    arm_joint_pos:
+      shape: [6]
+      type: low_dim
+    last_arm_action:
+      shape: [6]
+      type: low_dim
+    last_gripper_action:
+      shape: [1]
+      type: low_dim
+  action:
+    shape: [7]
+
+task_name: &task_name sim2real_image
+
+env_runner:
+  _target_: diffusion_policy.env_runner.dummy_runner.DummyRunner
+
+dataset:
+  _target_: diffusion_policy.dataset.sim2real_image_dataset.Sim2RealImageDataset
+  dataset_path: data/sim2real_image
+  shape_meta: *shape_meta
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps}-1+${n_latency_steps}'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+  n_obs_steps: ${dataset_obs_steps}
+  n_latency_steps: ${n_latency_steps}
+  seed: 42
+  val_ratio: 0.02

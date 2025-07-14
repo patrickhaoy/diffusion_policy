@@ -10,7 +10,7 @@ obs_keys: &obs_keys ['arm_joint_pos', 'end_effector_pose', 'fixed_asset_pose',
 task_name: &task_name sim2real_lowdim
 
 env_runner:
-  _target_: diffusion_policy.env_runner.sim2real_lowdim_runner.Sim2RealLowdimRunner
+  _target_: diffusion_policy.env_runner.dummy_runner.DummyRunner
 
 dataset:
   _target_: diffusion_policy.dataset.sim2real_state_dataset.Sim2RealStateDataset
