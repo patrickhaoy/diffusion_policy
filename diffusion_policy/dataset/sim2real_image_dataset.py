@@ -80,17 +80,17 @@ class Sim2RealImageDataset(BaseImageDataset):
         z = zarr.open(dataset_path, mode='r')
         obs_group = z['data']['obs']
         action_arr = z['data']['actions']
-        episode_ends = z['meta']['episode_ends'][:]
+        episode_ends = z['meta']['episode_ends']
 
         # Create replay buffer
         replay_buffer = ReplayBuffer.create_empty_numpy()
 
         # Add observations
         for key in obs_group.keys():
-            replay_buffer.root['data'][key] = obs_group[key][:]
+            replay_buffer.root['data'][key] = obs_group[key]
 
         # Add actions
-        replay_buffer.root['data']['action'] = action_arr[:]
+        replay_buffer.root['data']['action'] = action_arr
 
         # Add episode metadata
         replay_buffer.root['meta']['episode_ends'] = episode_ends

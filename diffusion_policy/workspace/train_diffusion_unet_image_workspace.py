@@ -60,6 +60,11 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
         # configure training state
         self.global_step = 0
         self.epoch = 0
+        self.use_amp = getattr(cfg.training, "amp", False)
+        if self.use_amp:
+            self.scaler = torch.cuda.amp.GradScaler()
+        else:
+            self.scaler = None
 
     def run(self):
         cfg = copy.deepcopy(self.cfg)
@@ -170,15 +175,24 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                             train_sampling_batch = batch
 
                         # compute loss
-                        raw_loss = self.model.compute_loss(batch)
-                        loss = raw_loss / cfg.training.gradient_accumulate_every
-                        loss.backward()
-
-                        # step optimizer
-                        if self.global_step % cfg.training.gradient_accumulate_every == 0:
-                            self.optimizer.step()
-                            self.optimizer.zero_grad()
-                            lr_scheduler.step()
+                        if self.use_amp:
+                            with torch.cuda.amp.autocast():
+                                raw_loss = self.model.compute_loss(batch)
+                                loss = raw_loss / cfg.training.gradient_accumulate_every
+                            self.scaler.scale(loss).backward()
+                            if self.global_step % cfg.training.gradient_accumulate_every == 0:
+                                self.scaler.step(self.optimizer)
+                                self.scaler.update()
+                                self.optimizer.zero_grad()
+                                lr_scheduler.step()
+                        else:
+                            raw_loss = self.model.compute_loss(batch)
+                            loss = raw_loss / cfg.training.gradient_accumulate_every
+                            loss.backward()
+                            if self.global_step % cfg.training.gradient_accumulate_every == 0:
+                                self.optimizer.step()
+                                self.optimizer.zero_grad()
+                                lr_scheduler.step()
                         
                         # update ema
                         if cfg.training.use_ema:
