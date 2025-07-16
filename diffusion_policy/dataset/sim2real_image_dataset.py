@@ -26,12 +26,13 @@ class Sim2RealImageDataset(BaseImageDataset):
         n_latency_steps=0,
         seed=42,
         val_ratio=0.0,
+        use_cache: bool = False,
     ):
         super().__init__()
         assert os.path.isdir(dataset_path)
 
         # Load data and create replay buffer
-        self.replay_buffer = self._create_replay_buffer_from_zarr(dataset_path)
+        self.replay_buffer = self._create_replay_buffer_from_zarr(dataset_path, use_cache=use_cache)
 
         # Parse keys
         self.rgb_keys = [
@@ -75,7 +76,7 @@ class Sim2RealImageDataset(BaseImageDataset):
         self.val_mask = val_mask
         self.train_mask = train_mask
 
-    def _create_replay_buffer_from_zarr(self, dataset_path):
+    def _create_replay_buffer_from_zarr(self, dataset_path, use_cache=False):
         """Create replay buffer from zarr data"""
         z = zarr.open(dataset_path, mode='r')
         obs_group = z['data']['obs']
@@ -87,13 +88,22 @@ class Sim2RealImageDataset(BaseImageDataset):
 
         # Add observations
         for key in obs_group.keys():
-            replay_buffer.root['data'][key] = obs_group[key]
+            if use_cache:
+                replay_buffer.root['data'][key] = obs_group[key][:]
+            else:
+                replay_buffer.root['data'][key] = obs_group[key]
 
         # Add actions
-        replay_buffer.root['data']['action'] = action_arr
+        if use_cache:
+            replay_buffer.root['data']['action'] = action_arr[:]
+        else:
+            replay_buffer.root['data']['action'] = action_arr
 
         # Add episode metadata
-        replay_buffer.root['meta']['episode_ends'] = episode_ends
+        if use_cache:
+            replay_buffer.root['meta']['episode_ends'] = episode_ends[:]
+        else:
+            replay_buffer.root['meta']['episode_ends'] = episode_ends
 
         return replay_buffer
 

@@ -39,3 +39,4 @@ dataset:
   n_latency_steps: ${n_latency_steps}
   seed: 42
   val_ratio: 0.02
+  use_cache: True
