@@ -117,6 +117,7 @@ logging:
   tags: ["${name}", "${task_name}", "${exp_name}"]
   id: null
   group: null
+  allow_val_change: True
 
 checkpoint:
   topk:
