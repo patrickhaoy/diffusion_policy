@@ -4,6 +4,7 @@ defaults:
 
 name: train_diffusion_unet_sim2real_image
 _target_: diffusion_policy.workspace.train_diffusion_unet_image_workspace.TrainDiffusionUnetImageWorkspace
+output_dir: null
 
 task_name: ${task.name}
 shape_meta: ${task.shape_meta}
