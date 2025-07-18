@@ -4,6 +4,7 @@ defaults:
 
 name: train_diffusion_unet_sim2real_lowdim
 _target_: diffusion_policy.workspace.train_diffusion_unet_lowdim_workspace.TrainDiffusionUnetLowdimWorkspace
+output_dir: null
 
 obs_dim: ${task.obs_dim}
 action_dim: ${task.action_dim}
@@ -13,7 +14,7 @@ exp_name: "default"
 
 horizon: 16
 n_obs_steps: 4
-n_action_steps: 8
+n_action_steps: 2
 n_latency_steps: 0
 past_action_visible: False
 keypoint_visible_rate: 1.0
