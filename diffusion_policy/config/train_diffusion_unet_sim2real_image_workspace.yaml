@@ -40,7 +40,8 @@ policy:
     rgb_model:
       _target_: diffusion_policy.model.vision.model_getter.get_resnet
       name: resnet18
-      weights: null
+      weights: IMAGENET1K_V1
+      feature_dim: 64
     resize_shape: null
     crop_shape: null
     random_crop: False
