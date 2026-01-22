@@ -8,11 +8,14 @@ This script:
 1. Samples random EE waypoints within workspace bounds
 2. Uses IK to get joint targets for each waypoint
 3. Interpolates between waypoints in joint space
-4. Executes with PD torque control at 500Hz
-5. Logs data at 120Hz for PACE system ID
+4. Executes with PD torque control at 500Hz (controller frequency)
+5. Sends actions at 100Hz (every 5th control step)
+6. Logs data at 100Hz (matches action frequency)
 
 This approach provides much better joint space coverage than chirp trajectories
 since the joints move through their full range while traversing the workspace.
+
+Note: PD controller matches IdealPDActuator behavior (no position error clipping, only torque clipping).
 """
 
 import numpy as np
@@ -44,21 +47,16 @@ def compute_pd_torque(target_joints: np.ndarray,
                       torque_max: np.ndarray) -> np.ndarray:
     """
     Compute PD torque command from joint position error.
-    Same implementation as rtde_interpolation_controller.py TORQUE_PD mode.
+    Matches DCMotor behavior: no position error clipping, only torque clipping.
     """
     # Position error with clipping (same limits as rtde_interpolation_controller.py)
     q_err = target_joints - curr_joints
-    q_err = np.clip(q_err, 
-                    [-np.pi / 6, -np.pi / 6, -np.pi / 6, -np.pi / 4, -np.pi / 4, -np.pi / 4], 
-                    [np.pi / 6, np.pi / 6, np.pi / 6, np.pi / 4, np.pi / 4, np.pi / 4])
     
     # PD control: torque = Kp * pos_error - Kd * vel
     torque_d = -torque_kd * curr_vel
-    # Clip derivative term to prevent spikes
-    torque_d_clipped = np.clip(torque_d, -0.2 * torque_max, 0.2 * torque_max)
-    torque_target = torque_kp * q_err + torque_d_clipped
+    torque_target = torque_kp * q_err + torque_d
     
-    # Clamp total torque to max limits
+    # Clamp total torque to max limits (only clipping)
     torque_target = np.clip(torque_target, -torque_max, torque_max)
     
     return torque_target.astype(float)
@@ -190,7 +188,7 @@ def interpolate_trajectory(waypoint_joints, waypoint_times, control_frequency):
 
 
 def collect_segment(rtde_c, rtde_r, waypoint_joints, waypoint_positions, waypoint_rotations,
-                   segment_duration, log_frequency, control_frequency,
+                   segment_duration, control_frequency, action_frequency, action_decimation,
                    torque_kp, torque_kd, torque_max, move_speed, move_accel, segment_name):
     """Collect data while moving through waypoints with PD torque control.
     
@@ -215,11 +213,11 @@ def collect_segment(rtde_c, rtde_r, waypoint_joints, waypoint_positions, waypoin
     # Compute time for each waypoint (evenly distributed)
     waypoint_times = np.linspace(0, segment_duration, n_waypoints)
     
-    # Precompute interpolated trajectory
+    # Precompute interpolated trajectory at action frequency (100Hz)
     print(f"[INFO]: Precomputing trajectory ({n_waypoints} waypoints over {segment_duration}s)...")
-    times, joint_targets = interpolate_trajectory(waypoint_joints, waypoint_times, control_frequency)
+    times, joint_targets = interpolate_trajectory(waypoint_joints, waypoint_times, action_frequency)
     n_steps = len(times)
-    print(f"[INFO]: Trajectory ready - {n_steps} steps at {control_frequency}Hz")
+    print(f"[INFO]: Trajectory ready - {n_steps} steps at {action_frequency}Hz")
     
     # Data storage
     time_data = []
@@ -230,12 +228,21 @@ def collect_segment(rtde_c, rtde_r, waypoint_joints, waypoint_positions, waypoin
     ee_pose_data = []
     
     # Timing
-    log_interval_steps = control_frequency / log_frequency
-    log_accumulator = 0.0
     t_start_traj = time.time()
     iter_idx = 0
+    action_counter = 0  # Counter for action decimation
+    
+    # Initialize target and torque command
+    curr_joints_init = np.array(rtde_r.getActualQ(), dtype=float)
+    curr_vel_init = np.array(rtde_r.getActualQd(), dtype=float)
+    target_joints = joint_targets[0]
+    torque_cmd = compute_pd_torque(
+        target_joints, curr_joints_init, curr_vel_init,
+        torque_kp, torque_kd, torque_max
+    )
     
     print(f"[INFO]: Executing trajectory for {segment_name}...")
+    print(f"[INFO]: Controller running at {control_frequency}Hz, actions/logging at {action_frequency}Hz")
     
     while True:
         t_loop_start = rtde_c.initPeriod()
@@ -247,35 +254,33 @@ def collect_segment(rtde_c, rtde_r, waypoint_joints, waypoint_positions, waypoin
         if t_traj >= segment_duration:
             break
         
-        # Get current state
+        # Get current state (always read at 500Hz for accurate control)
         curr_joints = np.array(rtde_r.getActualQ(), dtype=float)
         curr_vel = np.array(rtde_r.getActualQd(), dtype=float)
         curr_pose = rtde_r.getActualTCPPose()
         
-        # Look up precomputed target
-        step_idx = min(int(t_traj * control_frequency), n_steps - 1)
-        target_joints = joint_targets[step_idx]
-        
-        # Compute PD torque command
-        torque_cmd = compute_pd_torque(
-            target_joints, curr_joints, curr_vel,
-            torque_kp, torque_kd, torque_max
-        )
-        
-        # Send torque command
-        rtde_c.directTorque(torque_cmd.tolist(), friction_comp=False)
-        
-        # Log data at log_frequency
-        log_accumulator += 1.0
-        if log_accumulator >= log_interval_steps:
-            log_accumulator -= log_interval_steps
+        # Only update target and send command at action frequency (100Hz)
+        if action_counter % action_decimation == 0:
+            # Look up precomputed target at action frequency
+            step_idx = min(int(t_traj * action_frequency), n_steps - 1)
+            target_joints = joint_targets[step_idx]
             
+            # Compute PD torque command
+            torque_cmd = compute_pd_torque(
+                target_joints, curr_joints, curr_vel,
+                torque_kp, torque_kd, torque_max
+            )
+            
+            # Log data at action frequency (100Hz)
             time_data.append(t_traj)
             joint_pos_data.append(curr_joints.copy())
             joint_vel_data.append(curr_vel.copy())
             joint_target_pos_data.append(target_joints.copy())
             torque_cmd_data.append(torque_cmd.copy())
             ee_pose_data.append(np.array(curr_pose))
+        
+        # Send torque command at control frequency (500Hz) - use last computed command
+        rtde_c.directTorque(torque_cmd.tolist(), friction_comp=False)
         
         # Progress print
         if iter_idx % 1000 == 0:
@@ -285,6 +290,7 @@ def collect_segment(rtde_c, rtde_r, waypoint_joints, waypoint_positions, waypoin
         
         rtde_c.waitPeriod(t_loop_start)
         iter_idx += 1
+        action_counter += 1
     
     # Return segment data
     segment_data = {
@@ -311,12 +317,11 @@ def collect_segment(rtde_c, rtde_r, waypoint_joints, waypoint_positions, waypoin
 @click.option('--robot_ip', '-ri', default='192.168.1.10', help="UR5's IP address")
 @click.option('--segment_duration', '-d', default=20.0, type=float, help="Duration per segment (seconds).")
 @click.option('--n_waypoints', '-nw', default=15, type=int, help="Number of waypoints per segment.")
-@click.option('--log_frequency', '-lf', default=120, type=float, help="Logging frequency in Hz.")
 @click.option('--max_rot_angle', '-mra', default=45.0, type=float, help="Max rotation angle from home (degrees).")
 @click.option('--n_train_segments', '-nt', default=3, type=int, help="Number of training segments.")
 @click.option('--n_test_segments', '-nv', default=1, type=int, help="Number of test segments.")
 @click.option('--seed', '-s', default=42, type=int, help="Random seed for reproducibility.")
-def main(output, robot_ip, segment_duration, n_waypoints, log_frequency, max_rot_angle, 
+def main(output, robot_ip, segment_duration, n_waypoints, max_rot_angle, 
          n_train_segments, n_test_segments, seed):
     """Collect random waypoint data for PACE system identification."""
     
@@ -328,6 +333,9 @@ def main(output, robot_ip, segment_duration, n_waypoints, log_frequency, max_rot
     
     # Control frequency (500Hz required by UR for torque control)
     control_frequency = 500
+    # Action/logging frequency (100Hz - send actions and log every 5th control step)
+    action_frequency = 100
+    action_decimation = control_frequency // action_frequency  # 5
     
     # Connect to robot
     rtde_c = RTDEControlInterface(
@@ -356,8 +364,9 @@ def main(output, robot_ip, segment_duration, n_waypoints, log_frequency, max_rot
         
         print(f"[INFO]: PD gains - Kp: {torque_kp}")
         print(f"[INFO]: PD gains - Kd: {torque_kd}")
-        print(f"[INFO]: Control frequency: {control_frequency}Hz")
-        print(f"[INFO]: Log frequency: {log_frequency}Hz")
+        print(f"[INFO]: Control frequency: {control_frequency}Hz (controller)")
+        print(f"[INFO]: Action frequency: {action_frequency}Hz (command updates)")
+        print(f"[INFO]: Logging frequency: {action_frequency}Hz (matches actions)")
         print(f"[INFO]: Segment duration: {segment_duration}s")
         print(f"[INFO]: Waypoints per segment: {n_waypoints}")
         
@@ -423,7 +432,7 @@ def main(output, robot_ip, segment_duration, n_waypoints, log_frequency, max_rot
             # Collect segment
             segment = collect_segment(
                 rtde_c, rtde_r, waypoint_joints, waypoint_positions, waypoint_rotations,
-                segment_duration, log_frequency, control_frequency,
+                segment_duration, control_frequency, action_frequency, action_decimation,
                 torque_kp, torque_kd, torque_max, move_speed, move_accel, segment_name
             )
             
@@ -465,7 +474,7 @@ def main(output, robot_ip, segment_duration, n_waypoints, log_frequency, max_rot
                 concat_des_dof_pos.append(seg["des_dof_pos"].numpy())
                 concat_joint_vel.append(seg["joint_vel"].numpy())
                 concat_torque_cmd.append(seg["torque_cmd"].numpy())
-                t_offset = seg_time[-1] + 1.0 / log_frequency
+                t_offset = seg_time[-1] + 1.0 / action_frequency
             
             return {
                 "time": torch.from_numpy(np.concatenate(concat_time)).float(),
@@ -485,7 +494,8 @@ def main(output, robot_ip, segment_duration, n_waypoints, log_frequency, max_rot
             train_concat["torque_kp"] = torch.from_numpy(torque_kp).float()
             train_concat["torque_kd"] = torch.from_numpy(torque_kd).float()
             train_concat["torque_max"] = torch.from_numpy(torque_max).float()
-            train_concat["log_frequency"] = log_frequency
+            train_concat["log_frequency"] = action_frequency  # Logging at action frequency
+            train_concat["control_frequency"] = control_frequency  # Controller frequency
             torch.save(train_concat, output_path / "train.pt")
         
         if test_segments:
@@ -493,13 +503,15 @@ def main(output, robot_ip, segment_duration, n_waypoints, log_frequency, max_rot
             test_concat["torque_kp"] = torch.from_numpy(torque_kp).float()
             test_concat["torque_kd"] = torch.from_numpy(torque_kd).float()
             test_concat["torque_max"] = torch.from_numpy(torque_max).float()
-            test_concat["log_frequency"] = log_frequency
+            test_concat["log_frequency"] = action_frequency  # Logging at action frequency
+            test_concat["control_frequency"] = control_frequency  # Controller frequency
             torch.save(test_concat, output_path / "test.pt")
         
         # Save metadata
         metadata = {
-            "log_frequency": log_frequency,
-            "control_frequency": control_frequency,
+            "log_frequency": action_frequency,  # Logging at action frequency
+            "control_frequency": control_frequency,  # Controller frequency
+            "action_frequency": action_frequency,  # Action update frequency
             "segment_duration": segment_duration,
             "n_waypoints_per_segment": n_waypoints,
             "torque_kp": torque_kp.tolist(),
