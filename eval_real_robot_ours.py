@@ -55,46 +55,6 @@ import robomimic.utils.torch_utils as TorchUtils
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 
-def apply_delta_pose(source_pose: np.ndarray, delta_pose: np.ndarray, scale: float = 1.0, eps: float = 1.0e-6) -> np.ndarray:
-    """
-    Apply delta pose transformation on source pose with interpolation scaling.
-    
-    Args:
-        source_pose: Current TCP pose [x, y, z, rx, ry, rz] in axis-angle format
-        delta_pose: Position and orientation displacements [dx, dy, dz, drx, dry, drz]
-        scale: Interpolation factor (0.0 = no change, 1.0 = full delta)
-        eps: Tolerance to consider orientation displacement as zero
-        
-    Returns:
-        Target pose [x, y, z, rx, ry, rz] in axis-angle format
-    """
-    # Scale the delta pose
-    scaled_delta_pose = delta_pose * scale
-    
-    # Position delta: simply add scaled delta
-    target_pos = source_pose[:3] + scaled_delta_pose[:3]
-    
-    # Rotation delta: compose rotations with scaled delta
-    rot_actions = scaled_delta_pose[3:6]
-    angle = np.linalg.norm(rot_actions)
-    
-    if angle > eps:
-        # Convert delta rotation to rotation matrix
-        axis = rot_actions / angle
-        delta_rot = R.from_rotvec(rot_actions)
-        
-        # Convert current rotation to rotation matrix
-        current_rot = R.from_rotvec(source_pose[3:6])
-        
-        # Compose rotations: target = delta * current
-        target_rot = delta_rot * current_rot
-        target_rotvec = target_rot.as_rotvec()
-    else:
-        # No rotation change
-        target_rotvec = source_pose[3:6]
-    
-    return np.concatenate([target_pos, target_rotvec])
-
 
 @click.command()
 @click.option('--input', '-i', required=True, help='Path to checkpoint')
@@ -119,14 +79,12 @@ def apply_delta_pose(source_pose: np.ndarray, delta_pose: np.ndarray, scale: flo
               help="Control frequency in Hz.")
 @click.option('--save_video', is_flag=True, default=False,
               help='Save video of concatenated camera views.')
-@click.option('--cartesian_delta', is_flag=True, default=True,
-              help='Use Cartesian delta control mode instead of joint control.')
-@click.option('--delta_scale', default=0.1, type=float,
-              help='Scale factor for delta poses (0.0 = no change, 1.0 = full delta).')
+@click.option('--action_scale', default=1.0, type=float,
+              help='Scale factor for relative joint actions.')
 def main(input, output, robot_ip, match_dataset, match_episode,
          vis_camera_idx, init_joints, 
          steps_per_inference, max_duration,
-         frequency, save_video, cartesian_delta, delta_scale):
+         frequency, save_video, action_scale):
     # load match_dataset
     match_camera_idx = 0
     episode_first_frame_map = dict()
@@ -163,7 +121,6 @@ def main(input, output, robot_ip, match_dataset, match_episode,
     workspace.load_payload(payload, exclude_keys=None, include_keys=None)
 
     # hacks for method-specific setup.
-    delta_action = False
     policy: BaseImagePolicy
     policy = workspace.model
     if cfg.training.use_ema:
@@ -182,8 +139,7 @@ def main(input, output, robot_ip, match_dataset, match_episode,
     print("n_obs_steps: ", n_obs_steps)
     print("steps_per_inference: ", steps_per_inference)
     print("n_action_steps: ", n_action_steps)
-    print("cartesian_delta mode: ", cartesian_delta)
-    print("delta_scale: ", delta_scale)
+    print("action_scale: ", action_scale)
 
     with SharedMemoryManager() as shm_manager:
         with Spacemouse(shm_manager=shm_manager) as sm, RealEnv(
@@ -206,9 +162,6 @@ def main(input, output, robot_ip, match_dataset, match_episode,
             video_crf=21,
             shm_manager=shm_manager) as env:
             
-            # Set delta scale if in cartesian delta mode
-            if cartesian_delta:
-                env.set_delta_scale(delta_scale)
             cv2.setNumThreads(1)
 
             print("Waiting for realsense")
@@ -232,9 +185,6 @@ def main(input, output, robot_ip, match_dataset, match_episode,
                     # Handle case where result might not be defined
                     if 'result' in locals():
                         del result
-
-            # initial target pose required
-            target_pose = env.get_robot_state()['TargetTCPPose']
 
             print('Ready!')
             time.sleep(1.0)
@@ -262,7 +212,6 @@ def main(input, output, robot_ip, match_dataset, match_episode,
                     print("Started!")
                     iter_idx = 0
                     term_area_start_timestamp = float('inf')
-                    perv_target_pose = None
                     while True:
                         # calculate timing
                         t_cycle_end = t_start + (iter_idx + steps_per_inference) * dt
@@ -303,26 +252,19 @@ def main(input, output, robot_ip, match_dataset, match_episode,
                             # this action starts from the first obs step
                             action = result['action'][0:1].detach().to('cpu').numpy() 
 
-                            # current_joints = env.get_robot_state()['ActualQ'][None, :]
-                            # action_joints = action[:, :6]
-                            # action_joints = current_joints + (action_joints - current_joints) * 0.05
-                            # action = np.concatenate([action_joints, action[:, 6:]], axis=1)
-
                             # print('Inference latency:', time.time() - s)
-                        # convert policy action to env actions
-                        if delta_action:
-                            assert len(action) == 1
-                            if perv_target_pose is None:
-                                perv_target_pose = obs['robot_eef_pose'][-1]
-                            this_target_pose = perv_target_pose.copy()
-                            this_target_pose[[0,1]] += action[-1]
-                            perv_target_pose = this_target_pose
-                            this_target_poses = np.expand_dims(this_target_pose, axis=0)
-                        else:
-                            this_target_poses = action.copy()
+                        
+                        # Convert relative joint actions to absolute joint positions
+                        # action shape: (N, 7) where [:, :6] is joint delta, [:, 6] is gripper
+                        current_joints = env.get_robot_state()['ActualQ']
+                        joint_deltas = action[:, :6] * action_scale  # Scale relative joint actions
+                        gripper_actions = action[:, 6:7]  # Keep gripper as-is
+                        
+                        # Compute absolute joint targets by adding deltas to current position
+                        absolute_joint_targets = current_joints + joint_deltas
+                        target_actions = np.concatenate([absolute_joint_targets, gripper_actions], axis=1)
 
                         # deal with timing
-                        # the same step actions are always the target for
                         action_timestamps = (np.arange(len(action), dtype=np.float64)
                             ) * dt + obs_timestamps[-1]
                         action_exec_latency = 0.01
@@ -330,38 +272,22 @@ def main(input, output, robot_ip, match_dataset, match_episode,
                         is_new = action_timestamps > (curr_time + action_exec_latency)
                         if np.sum(is_new) == 0:
                             # exceeded time budget, still do something
-                            this_target_poses = this_target_poses[[-1]]
+                            target_actions = target_actions[[-1]]
                             # schedule on next available step
                             next_step_idx = int(np.ceil((curr_time - eval_t_start) / dt))
                             action_timestamp = eval_t_start + (next_step_idx) * dt
                             print('Over budget', action_timestamp - curr_time)
                             action_timestamps = np.array([action_timestamp])
                         else:
-                            this_target_poses = this_target_poses[is_new]
+                            target_actions = target_actions[is_new]
                             action_timestamps = action_timestamps[is_new]
-
-                        # clip actions
-                        # this_target_poses[:,:2] = np.clip(
-                        # this_target_poses[:,:2], [0.25, -0.45], [0.77, 0.40])
-
-                        # this_target_poses[:,:2] = np.clip(Fexec_cartesian_actions
-                        # this_target_poses[:,:2], [0.25, -0.45], [0.77, 0.40])
                         
-                        if cartesian_delta:
-                            # Use cartesian control method
-                            actions.append(this_target_poses)
-                            np.save('actions.npy', np.array(actions))
-                            env.exec_cartesian_actions(
-                                target_poses=this_target_poses[:n_action_steps],
-                                timestamps=action_timestamps[:n_action_steps],
-                                delta_actions=action[:n_action_steps]  # Pass original delta actions
-                            )
-                        else:
-                            # Use joint control method (default)
-                            env.exec_actions(
-                                actions=this_target_poses[:n_action_steps],
-                                timestamps=action_timestamps[:n_action_steps]
-                            )
+                        # Execute joint actions with torque control
+                        actions.append(target_actions)
+                        env.exec_actions(
+                            actions=target_actions[:n_action_steps],
+                            timestamps=action_timestamps[:n_action_steps]
+                        )
                         print(f"Submitted {n_action_steps} steps of actions.")
 
                         # Visualize camera feed for key detection
@@ -422,11 +348,9 @@ def main(input, output, robot_ip, match_dataset, match_episode,
                             env.start_episode(eval_t_start)
                             precise_wait(eval_t_start - frame_latency, time_func=time.time)
                             
-                            # Reset iteration counter and target pose
+                            # Reset iteration counter
                             iter_idx = 0
                             term_area_start_timestamp = float('inf')
-                            perv_target_pose = None
-                            target_pose = env.get_robot_state()['TargetTCPPose']
                             
                             print('Robot reset complete! Starting new trajectory.')
                             continue

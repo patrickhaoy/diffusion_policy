@@ -17,6 +17,11 @@ Press "S" to stop recording.
 Press "Q" to exit program.
 Press "Backspace" to delete the previously recorded episode.
 
+PACE data collection (for sim2real alignment):
+Press "T" to start/stop PACE TRAIN trajectory recording.
+Press "V" to start/stop PACE VALIDATION trajectory recording.
+Data is auto-saved when recording stops.
+
 Macro controls:
 Press "R" to go to the above peg tcp position
 Press "Down Arrow" to use the screw macro
@@ -29,12 +34,22 @@ import click
 import cv2
 import numpy as np
 import json
+import torch
+from pathlib import Path
 from diffusion_policy.real_world.real_env import RealEnv
 from diffusion_policy.common.precise_sleep import precise_wait
 from diffusion_policy.real_world.keystroke_counter import (
     KeystrokeCounter, Key, KeyCode
 )
 from diffusion_policy.real_world.mello_teleop import MelloTeleopInterface, DummyMelloTeleopInterface
+
+
+def compute_pd_torque(target_joints, curr_joints, curr_vel, torque_kp, torque_kd, torque_max):
+    """Compute PD torque for logging (matches rtde_interpolation_controller.py)."""
+    q_err = np.array(target_joints) - np.array(curr_joints)
+    torque_d = -torque_kd * np.array(curr_vel)
+    torque_target = torque_kp * q_err + torque_d
+    return np.clip(torque_target, -torque_max, torque_max)
 
 @click.command()
 @click.option('--output', '-o', required=True, help="Directory to save demonstration dataset.")
@@ -45,7 +60,8 @@ from diffusion_policy.real_world.mello_teleop import MelloTeleopInterface, Dummy
 @click.option('--frequency', '-f', default=10, type=float, help="Control frequency in Hz.")
 @click.option('--command_latency', '-cl', default=0.01, type=float, help="Latency between receiving command to executing on Robot in Sec.")
 @click.option('--debug', is_flag=True, help="Use dummy Mello interface with fixed joint positions for testing.")
-def main(output, robot_ip, mello_port, vis_camera_idx, init_joints, frequency, command_latency, debug):
+@click.option('--pace_output', '-po', default='data/pace_teleop', help="Directory to save PACE trajectory data.")
+def main(output, robot_ip, mello_port, vis_camera_idx, init_joints, frequency, command_latency, debug, pace_output):
 
     configs = [
         json.load(open("diffusion_policy/real_world/realsense_config/"
@@ -83,10 +99,33 @@ def main(output, robot_ip, mello_port, vis_camera_idx, init_joints, frequency, c
             ) as env:
             cv2.setNumThreads(1)
 
+            # PACE data logging setup
+            pace_output_path = Path(pace_output)
+            pace_output_path.mkdir(parents=True, exist_ok=True)
+            
+            # PD control parameters (must match rtde_interpolation_controller.py)
+            torque_max = np.array([150.0, 150.0, 150.0, 28.0, 28.0, 28.0])
+            torque_kp = torque_max / np.array([1, 1, 1, 1, 1, 1])  # Lower stiffness
+            torque_kd = torque_max / (np.pi * 0.5)
+            
+            # PACE recording state
+            is_pace_recording = False
+            pace_record_type = None  # 'train' or 'val'
+            pace_data = {
+                'time': [], 'joint_pos': [], 'joint_vel': [],
+                'joint_target': [], 'torque_cmd': []
+            }
+            pace_train_count = len(list(pace_output_path.glob('train_*.pt')))
+            pace_val_count = len(list(pace_output_path.glob('val_*.pt')))
+
             time.sleep(1.0)
             print('Ready!')
+            print(f'PACE output directory: {pace_output_path}')
+            print(f'  Existing train trajectories: {pace_train_count}')
+            print(f'  Existing val trajectories: {pace_val_count}')
             stage = key_counter[Key.space]
             t_start = time.monotonic()
+            pace_t_start = None
             iter_idx = 0
             stop = False
             is_recording = False
@@ -142,6 +181,70 @@ def main(output, robot_ip, mello_port, vis_camera_idx, init_joints, frequency, c
                     elif key_stroke == Key.right:
                         # Stop reverse twisting macro
                         is_reverse_twisting = False
+                    elif key_stroke == KeyCode(char='t'):
+                        # Toggle PACE TRAIN recording
+                        if not is_pace_recording:
+                            is_pace_recording = True
+                            pace_record_type = 'train'
+                            pace_t_start = time.time()
+                            pace_data = {'time': [], 'joint_pos': [], 'joint_vel': [],
+                                        'joint_target': [], 'torque_cmd': []}
+                            print('PACE TRAIN recording started!')
+                        else:
+                            # Save and stop
+                            is_pace_recording = False
+                            if len(pace_data['time']) > 0:
+                                save_path = pace_output_path / f'train_{pace_train_count:02d}.pt'
+                                save_data = {
+                                    'time': torch.from_numpy(np.array(pace_data['time'])).float(),
+                                    'dof_pos': torch.from_numpy(np.array(pace_data['joint_pos'])).float(),
+                                    'des_dof_pos': torch.from_numpy(np.array(pace_data['joint_target'])).float(),
+                                    'joint_pos': torch.from_numpy(np.array(pace_data['joint_pos'])).float(),
+                                    'joint_vel': torch.from_numpy(np.array(pace_data['joint_vel'])).float(),
+                                    'action': torch.from_numpy(np.array(pace_data['joint_target'])).float(),
+                                    'torque_cmd': torch.from_numpy(np.array(pace_data['torque_cmd'])).float(),
+                                    'torque_kp': torch.from_numpy(torque_kp).float(),
+                                    'torque_kd': torch.from_numpy(torque_kd).float(),
+                                    'torque_max': torch.from_numpy(torque_max).float(),
+                                    'log_frequency': frequency,
+                                    'n_samples': len(pace_data['time']),
+                                }
+                                torch.save(save_data, save_path)
+                                pace_train_count += 1
+                                print(f'PACE TRAIN saved: {save_path} ({len(pace_data["time"])} samples)')
+                            pace_record_type = None
+                    elif key_stroke == KeyCode(char='v'):
+                        # Toggle PACE VALIDATION recording
+                        if not is_pace_recording:
+                            is_pace_recording = True
+                            pace_record_type = 'val'
+                            pace_t_start = time.time()
+                            pace_data = {'time': [], 'joint_pos': [], 'joint_vel': [],
+                                        'joint_target': [], 'torque_cmd': []}
+                            print('PACE VALIDATION recording started!')
+                        else:
+                            # Save and stop
+                            is_pace_recording = False
+                            if len(pace_data['time']) > 0:
+                                save_path = pace_output_path / f'val_{pace_val_count:02d}.pt'
+                                save_data = {
+                                    'time': torch.from_numpy(np.array(pace_data['time'])).float(),
+                                    'dof_pos': torch.from_numpy(np.array(pace_data['joint_pos'])).float(),
+                                    'des_dof_pos': torch.from_numpy(np.array(pace_data['joint_target'])).float(),
+                                    'joint_pos': torch.from_numpy(np.array(pace_data['joint_pos'])).float(),
+                                    'joint_vel': torch.from_numpy(np.array(pace_data['joint_vel'])).float(),
+                                    'action': torch.from_numpy(np.array(pace_data['joint_target'])).float(),
+                                    'torque_cmd': torch.from_numpy(np.array(pace_data['torque_cmd'])).float(),
+                                    'torque_kp': torch.from_numpy(torque_kp).float(),
+                                    'torque_kd': torch.from_numpy(torque_kd).float(),
+                                    'torque_max': torch.from_numpy(torque_max).float(),
+                                    'log_frequency': frequency,
+                                    'n_samples': len(pace_data['time']),
+                                }
+                                torch.save(save_data, save_path)
+                                pace_val_count += 1
+                                print(f'PACE VALIDATION saved: {save_path} ({len(pace_data["time"])} samples)')
+                            pace_record_type = None
 
 
 
@@ -222,6 +325,29 @@ def main(output, robot_ip, mello_port, vis_camera_idx, init_joints, frequency, c
                         # Close enough to initial position, reset twist states
                         twist_step_count = 0
                         reverse_twist_step_count = 0
+
+                # Log PACE data if recording
+                if is_pace_recording and pace_t_start is not None:
+                    robot_state = env.robot.get_state()
+                    curr_joints = np.array(robot_state["ActualQ"])
+                    curr_vel = np.array(robot_state["ActualQd"])
+                    target_joints = unified_action[:6]  # Joint targets being sent
+                    
+                    # Compute torque command (for logging, actual torque computed in controller)
+                    torque_cmd = compute_pd_torque(
+                        target_joints, curr_joints, curr_vel,
+                        torque_kp, torque_kd, torque_max
+                    )
+                    
+                    pace_data['time'].append(time.time() - pace_t_start)
+                    pace_data['joint_pos'].append(curr_joints.copy())
+                    pace_data['joint_vel'].append(curr_vel.copy())
+                    pace_data['joint_target'].append(target_joints.copy())
+                    pace_data['torque_cmd'].append(torque_cmd.copy())
+                    
+                    # Print progress every 50 samples
+                    if len(pace_data['time']) % 50 == 0:
+                        print(f'  PACE {pace_record_type}: {len(pace_data["time"])} samples')
 
                 # execute teleop command
                 env.exec_actions(

@@ -333,9 +333,9 @@ def main(output, robot_ip, segment_duration, n_waypoints, max_rot_angle,
     
     # Control frequency (500Hz required by UR for torque control)
     control_frequency = 500
-    # Action/logging frequency (100Hz - send actions and log every 5th control step)
-    action_frequency = 100
-    action_decimation = control_frequency // action_frequency  # 5
+    # Action/logging frequency (10Hz - matches policy deployment frequency)
+    action_frequency = 10
+    action_decimation = control_frequency // action_frequency  # 50
     
     # Connect to robot
     rtde_c = RTDEControlInterface(
@@ -357,9 +357,9 @@ def main(output, robot_ip, segment_duration, n_waypoints, max_rot_angle,
         rtde_c.setTcp(tcp_offset_pose)
         print(f"[INFO]: Set TCP offset: X={tcp_offset_x:.4f}, Y={tcp_offset_y:.4f}, Z={tcp_offset_z:.4f} m")
         
-        # PD torque control parameters
+        # PD torque control parameters (matches rtde_interpolation_controller.py)
         torque_max = np.array([150.0, 150.0, 150.0, 28.0, 28.0, 28.0])
-        torque_kp = torque_max / np.array([0.25, 0.25, 0.5, 1, 1, 1])
+        torque_kp = torque_max / np.array([1, 1, 1, 1, 1, 1])  # Lower stiffness for smoother transfer
         torque_kd = torque_max / (np.pi * 0.5)
         
         print(f"[INFO]: PD gains - Kp: {torque_kp}")

@@ -64,7 +64,7 @@ class RTDEInterpolationController(mp.Process):
         
         # PD torque control parameters (same as collect_chirp_data.py)
         self.torque_max = np.array([150.0, 150.0, 150.0, 28.0, 28.0, 28.0], dtype=np.float64)
-        self.torque_kp = self.torque_max / np.array([0.25, 0.25, 0.5, 1, 1, 1], dtype=np.float64)
+        self.torque_kp = self.torque_max / np.array([1, 1, 1, 1, 1, 1], dtype=np.float64)
         self.torque_kd = self.torque_max / (np.pi * 0.5)
         
         # build input queue
