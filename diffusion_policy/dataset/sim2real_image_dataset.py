@@ -1,4 +1,9 @@
 from typing import Dict
+import json
+import hashlib
+import shutil
+from filelock import FileLock
+from omegaconf import OmegaConf
 import torch
 import numpy as np
 import copy
@@ -61,11 +66,51 @@ class Sim2RealImageDataset(BaseImageDataset):
     ):
         super().__init__()
         assert os.path.isdir(dataset_path)
-
+        #debug printing stuff
+        print("shape_meta: ", shape_meta)
         # Load data and create replay buffer
         self.replay_buffer = self._create_replay_buffer_from_zarr(
             dataset_path, shape_meta=shape_meta, use_cache=use_cache,
             use_disk=use_disk)
+
+        # replay_buffer = None
+        # if use_cache:
+        #     # fingerprint shape_meta
+        #     shape_meta_json = json.dumps(OmegaConf.to_container(shape_meta), sort_keys=True)
+        #     shape_meta_hash = hashlib.md5(shape_meta_json.encode('utf-8')).hexdigest()
+        #     cache_zarr_path = os.path.join(dataset_path, shape_meta_hash + '.zarr.zip')
+        #     cache_lock_path = cache_zarr_path + '.lock'
+        #     print('Acquiring lock on cache.')
+        #     with FileLock(cache_lock_path):
+        #         if not os.path.exists(cache_zarr_path):
+        #             # cache does not exists
+        #             try:
+        #                 print('Cache does not exist. Creating!')
+        #                 replay_buffer = _get_replay_buffer( #doesn't exist in this file, so I've taken it from real_pusht_image_dataset.py
+        #                     dataset_path=dataset_path,
+        #                     shape_meta=shape_meta,
+        #                     store=zarr.MemoryStore()
+        #                 )
+        #                 print('Saving cache to disk.')
+        #                 with zarr.ZipStore(cache_zarr_path) as zip_store:
+        #                     replay_buffer.save_to_store(
+        #                         store=zip_store
+        #                     )
+        #             except Exception as e:
+        #                 shutil.rmtree(cache_zarr_path)
+        #                 raise e
+        #         else:
+        #             print('Loading cached ReplayBuffer from Disk.')
+        #             with zarr.ZipStore(cache_zarr_path, mode='r') as zip_store:
+        #                 replay_buffer = ReplayBuffer.copy_from_store(
+        #                     src_store=zip_store, store=zarr.MemoryStore())
+        #             print('Loaded!')
+        # else:
+        #     replay_buffer = _get_replay_buffer(
+        #         dataset_path=dataset_path,
+        #         shape_meta=shape_meta,
+        #         store=zarr.MemoryStore()
+        #     )
 
         # Parse keys
         self.rgb_keys = [

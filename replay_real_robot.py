@@ -429,6 +429,16 @@ def main(input, output, robot_ip, trajectory_idx, episode_idx, vis_camera_idx, i
     # Setup device
     device = TorchUtils.get_torch_device(try_to_use_cuda=True)
     
+    # Load RealSense camera configurations
+    configs = [
+        json.load(open("diffusion_policy/real_world/realsense_config/"
+                      "455_front.json")),
+        json.load(open("diffusion_policy/real_world/realsense_config/"
+                      "435_side.json")),
+        json.load(open("diffusion_policy/real_world/realsense_config/"
+                      "415_wrist.json"))
+    ]
+    
     # Setup timing
     dt = 1/frequency
     
@@ -481,6 +491,9 @@ def main(input, output, robot_ip, trajectory_idx, episode_idx, vis_camera_idx, i
             enable_multi_cam_vis=True,
             record_raw_video=True,
             rolling_action_buffer=True,
+            camera_serial_numbers=['215122255213', '832112070487',
+                                  '746112060198'],
+            camera_configs=configs,
             # number of threads per camera view for video recording (H.264)
             thread_per_video=3,
             # video recording quality, lower is better (but slower).
@@ -579,7 +592,7 @@ def main(input, output, robot_ip, trajectory_idx, episode_idx, vis_camera_idx, i
                             # joint_actions = this_target_poses[:, :6]
                             # gripper_actions = this_target_poses[:, 6:7]
                             # current_joints = env.get_robot_state()['ActualQ'][None, :]
-                            # joint_actions = current_joints + (joint_actions - current_joints) #* 0.4
+                            # joint_actions = current_joints + (joint_actions - current_joints) * 0.6
                             # this_target_poses = np.concatenate([joint_actions, gripper_actions], axis=1)
 
                             # Handle timing

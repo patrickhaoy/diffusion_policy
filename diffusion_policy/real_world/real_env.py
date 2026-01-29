@@ -44,10 +44,7 @@ class RealEnv:
             obs_float32=False,
             # action
             rolling_action_buffer=False,
-            max_pos_speed=0.25,
-            max_rot_speed=0.6,
             # robot
-            tcp_offset=0.13,
             init_joints=True,
             custom_init_joints=None,  # NEW: Custom initial joint positions
             # video capture params
@@ -167,21 +164,19 @@ class RealEnv:
                 print(f"Using custom initial joint positions: {j_init}")
             else:
                 # Use default initial joint positions
-                j_init = np.array([0,-90,90,-90,-90,0]) / 180 * np.pi
+                # j_init = np.array([0,-90,90,-90,-90,0]) / 180 * np.pi
+                # j_init = np.array([13.43, -66.08, 99.0, -123.53, -95.6, -0.21]) / 180 * np.pi
+                j_init = np.array([16.85, -79.74, 99.80, -114.68, -91.09, 20.43]) / 180 * np.pi
+                # j_init = np.array([12.95, -63.51, 91.74, -119.57, -72.81, -44.61]) / 180 * np.pi
                 # j_init = np.array([-0.5748, -1.2212, 1.6753, -2.0596, -1.1225, -1.0952])
+                # j_init = np.array([10.32, -66.41, 107.13, -141.71, -80.48, -15.71]) / 180 * np.pi
                 print(f"Using default initial joint positions: {j_init}")
 
         robot = RTDEInterpolationController(
             shm_manager=shm_manager,
             robot_ip=robot_ip,
             frequency=500,
-            acceleration=2.0,
-            Kp=1.0,
-            Kd=0.0,
             launch_timeout=3,
-            tcp_offset_pose=[0,0,tcp_offset,0,0,0],
-            payload_mass=None,
-            payload_cog=None,
             joints_init=j_init,
             joints_init_speed=1.05,
             soft_real_time=False,
@@ -197,8 +192,6 @@ class RealEnv:
         self.frequency = frequency
         self.n_obs_steps = n_obs_steps
         self.max_obs_buffer_size = max_obs_buffer_size
-        self.max_pos_speed = max_pos_speed
-        self.max_rot_speed = max_rot_speed
         self.obs_key_map = obs_key_map
         # recording
         self.output_dir = output_dir
@@ -358,12 +351,12 @@ class RealEnv:
             stages: Optional[np.ndarray]=None,
             max_joint_diff: float = 10.0):
         """
-        Execute unified robot actions including gripper control.
+        Execute unified robot actions using joint torque PD control.
         
         Args:
             actions: Unified robot actions (shape: N x 7) where:
-                - actions[:, :6] = Robot joint positions (in radians)
-                - actions[:, 6] = Gripper position (0=closed, 1=open)
+                - actions[:, :6] = Target joint positions (in radians) for torque control
+                - actions[:, 6] = Gripper position (<0=closed, >=0=open)
             timestamps: Action timestamps
             stages: Optional stage information
             max_joint_diff: Maximum allowed difference between commanded and current joint positions (in radians)
@@ -409,12 +402,11 @@ class RealEnv:
                     f"Action joints: {latest_joint_action}, Current joints: {current_joints}"
                 )
 
-        # schedule waypoints for joint control
+        # schedule waypoints for torque control
         for i in range(len(new_joint_actions)):
-            self.robot.impedance_control(
-                joints=new_joint_actions[i],
-                close_gripper=new_gripper_actions[i],
-                duration=1.0
+            self.robot.joint_torque_control(
+                target_joints=new_joint_actions[i],
+                close_gripper=new_gripper_actions[i]
             )
         if self.action_accumulator is not None:
             self.action_accumulator.put(

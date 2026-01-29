@@ -18,6 +18,7 @@ Make sure you can hit the robot hardware emergency-stop button quickly!
 
 Recording control:
 Press "S" to stop evaluation and gain control back.
+Press "R" to reset robot to initial position and start new trajectory.
 """
 
 # %%
@@ -46,6 +47,7 @@ from diffusion_policy.policy.base_image_policy import BaseImagePolicy
 
 # Add imageio import for video saving
 import imageio
+from scipy.spatial.transform import Rotation as R
 
 # Robomimic imports
 import robomimic.utils.torch_utils as TorchUtils
@@ -53,33 +55,36 @@ import robomimic.utils.torch_utils as TorchUtils
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 
+
 @click.command()
 @click.option('--input', '-i', required=True, help='Path to checkpoint')
 @click.option('--output', '-o', required=True, 
               help='Directory to save recording')
 @click.option('--robot_ip', '-ri', required=True, 
-              help="UR5's IP address e.g. 192.168.0.204")
+              help="UR5's IP address e.g. 192.168.1.10")
 @click.option('--match_dataset', '-m', default=None, 
               help='Dataset used to overlay and adjust initial condition')
 @click.option('--match_episode', '-me', default=None, type=int, 
               help='Match specific episode from the match dataset')
 @click.option('--vis_camera_idx', default=0, type=int, 
               help="Which RealSense camera to visualize.")
-@click.option('--init_joints', '-j', is_flag=True, default=True, 
+@click.option('--init_joints', '-j', is_flag=True, default=False, 
               help="Whether to initialize robot joint configuration in the "
                    "beginning.")
 @click.option('--steps_per_inference', '-si', default=1, type=int, 
               help="Action horizon for inference.")
-@click.option('--max_duration', '-md', default=60, 
+@click.option('--max_duration', '-md', default=1000, 
               help='Max duration for each epoch in seconds.')
 @click.option('--frequency', '-f', default=10, type=float, 
               help="Control frequency in Hz.")
 @click.option('--save_video', is_flag=True, default=False,
               help='Save video of concatenated camera views.')
+@click.option('--action_scale', default=1.0, type=float,
+              help='Scale factor for relative joint actions.')
 def main(input, output, robot_ip, match_dataset, match_episode,
          vis_camera_idx, init_joints, 
          steps_per_inference, max_duration,
-         frequency, save_video):
+         frequency, save_video, action_scale):
     # load match_dataset
     match_camera_idx = 0
     episode_first_frame_map = dict()
@@ -116,7 +121,6 @@ def main(input, output, robot_ip, match_dataset, match_episode,
     workspace.load_payload(payload, exclude_keys=None, include_keys=None)
 
     # hacks for method-specific setup.
-    delta_action = False
     policy: BaseImagePolicy
     policy = workspace.model
     if cfg.training.use_ema:
@@ -135,6 +139,7 @@ def main(input, output, robot_ip, match_dataset, match_episode,
     print("n_obs_steps: ", n_obs_steps)
     print("steps_per_inference: ", steps_per_inference)
     print("n_action_steps: ", n_action_steps)
+    print("action_scale: ", action_scale)
 
     with SharedMemoryManager() as shm_manager:
         with Spacemouse(shm_manager=shm_manager) as sm, RealEnv(
@@ -156,10 +161,11 @@ def main(input, output, robot_ip, match_dataset, match_episode,
             # video recording quality, lower is better (but slower).
             video_crf=21,
             shm_manager=shm_manager) as env:
+            
             cv2.setNumThreads(1)
 
             print("Waiting for realsense")
-            time.sleep(10.0)
+            time.sleep(5.0)
 
             print("Warming up policy inference")
             obs = env.get_obs()
@@ -180,9 +186,6 @@ def main(input, output, robot_ip, match_dataset, match_episode,
                     if 'result' in locals():
                         del result
 
-            # initial target pose required
-            target_pose = env.get_robot_state()['TargetTCPPose']
-
             print('Ready!')
             time.sleep(1.0)
             
@@ -190,6 +193,8 @@ def main(input, output, robot_ip, match_dataset, match_episode,
             if save_video:
                 frames_to_save = []
                 print("Video recording enabled - will save concatenated camera views")
+
+            actions = []
             
             while True:
                 # ========== policy control loop ==============
@@ -207,7 +212,6 @@ def main(input, output, robot_ip, match_dataset, match_episode,
                     print("Started!")
                     iter_idx = 0
                     term_area_start_timestamp = float('inf')
-                    perv_target_pose = None
                     while True:
                         # calculate timing
                         t_cycle_end = t_start + (iter_idx + steps_per_inference) * dt
@@ -215,7 +219,7 @@ def main(input, output, robot_ip, match_dataset, match_episode,
                         # get obs
                         obs = env.get_obs()
                         obs_timestamps = obs['timestamp']
-                        print(f'Obs latency {time.time() - obs_timestamps[-1]}')
+                        # print(f'Obs latency {time.time() - obs_timestamps[-1]}')
 
                         # Capture frames for video if enabled
                         if save_video:
@@ -247,22 +251,21 @@ def main(input, output, robot_ip, match_dataset, match_episode,
                             result = policy.predict_action(obs_dict)
                             # this action starts from the first obs step
                             action = result['action'][0:1].detach().to('cpu').numpy() 
-                            print('Inference latency:', time.time() - s)
-                            action = result['action'][0:1].detach().to('cpu').numpy() 
-                        # convert policy action to env actions
-                        if delta_action:
-                            assert len(action) == 1
-                            if perv_target_pose is None:
-                                perv_target_pose = obs['robot_eef_pose'][-1]
-                            this_target_pose = perv_target_pose.copy()
-                            this_target_pose[[0,1]] += action[-1]
-                            perv_target_pose = this_target_pose
-                            this_target_poses = np.expand_dims(this_target_pose, axis=0)
-                        else:
-                            this_target_poses = action.copy()
+
+                            # print('Inference latency:', time.time() - s)
+                        
+                        # Convert relative joint actions to absolute joint positions
+                        # action shape: (N, 7) where [:, :6] is joint delta, [:, 6] is gripper
+                        current_joints = env.get_robot_state()['ActualQ']
+                        joint_deltas = action[:, :6] * action_scale  # Scale relative joint actions
+                        gripper_actions = action[:, 6:7]  # Keep gripper as-is
+                        print(action)
+                        
+                        # Compute absolute joint targets by adding deltas to current position
+                        absolute_joint_targets = current_joints + joint_deltas
+                        target_actions = np.concatenate([absolute_joint_targets, gripper_actions], axis=1)
 
                         # deal with timing
-                        # the same step actions are always the target for
                         action_timestamps = (np.arange(len(action), dtype=np.float64)
                             ) * dt + obs_timestamps[-1]
                         action_exec_latency = 0.01
@@ -270,45 +273,42 @@ def main(input, output, robot_ip, match_dataset, match_episode,
                         is_new = action_timestamps > (curr_time + action_exec_latency)
                         if np.sum(is_new) == 0:
                             # exceeded time budget, still do something
-                            this_target_poses = this_target_poses[[-1]]
+                            target_actions = target_actions[[-1]]
                             # schedule on next available step
                             next_step_idx = int(np.ceil((curr_time - eval_t_start) / dt))
                             action_timestamp = eval_t_start + (next_step_idx) * dt
                             print('Over budget', action_timestamp - curr_time)
                             action_timestamps = np.array([action_timestamp])
                         else:
-                            this_target_poses = this_target_poses[is_new]
+                            target_actions = target_actions[is_new]
                             action_timestamps = action_timestamps[is_new]
-
-                        # clip actions
-                        # this_target_poses[:,:2] = np.clip(
-                        # this_target_poses[:,:2], [0.25, -0.45], [0.77, 0.40])
-
-                        # this_target_poses[:,:2] = np.clip(
-                        # this_target_poses[:,:2], [0.25, -0.45], [0.77, 0.40])
+                        
+                        # Execute joint actions with torque control
+                        actions.append(target_actions)
                         env.exec_actions(
-                            actions=this_target_poses[:n_action_steps],
+                            actions=target_actions[:n_action_steps],
                             timestamps=action_timestamps[:n_action_steps]
                         )
                         print(f"Submitted {n_action_steps} steps of actions.")
 
-                        # Only causing an error because of camera names
-                        # visualize
-                        # episode_id = env.replay_buffer.n_episodes
-                        # vis_img = obs[f'camera_{vis_camera_idx}'][-1]
-                        # text = 'Episode: {}, Time: {:.1f}'.format(
-                        #     episode_id, time.monotonic() - t_start
-                        # )
-                        # cv2.putText(
-                        #     vis_img,
-                        #     text,
-                        #     (10,20),
-                        #     fontFace=cv2.FONT_HERSHEY_SIMPLEX,
-                        #     fontScale=0.5,
-                        #     thickness=1,
-                        #     color=(255,255,255)
-                        # )
-                        # cv2.imshow('default', vis_img[...,::-1])
+                        # Visualize camera feed for key detection
+                        episode_id = env.replay_buffer.n_episodes
+                        camera_key = 'side_rgb'
+                        if camera_key in obs:
+                            vis_img = obs[camera_key][-1]
+                            text = 'Episode: {}, Time: {:.1f}'.format(
+                                episode_id, time.monotonic() - t_start
+                            )
+                            cv2.putText(
+                                vis_img,
+                                text,
+                                (10,20),
+                                fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+                                fontScale=0.5,
+                                thickness=1,
+                                color=(255,255,255)
+                            )
+                            cv2.imshow('Policy Control', vis_img[...,::-1])
 
 
                         key_stroke = cv2.pollKey()
@@ -318,6 +318,43 @@ def main(input, output, robot_ip, match_dataset, match_episode,
                             env.end_episode()
                             print('Stopped.')
                             break
+                        elif key_stroke == ord('r'):
+                            # Reset robot and start new trajectory
+                            print('Resetting robot for new trajectory...')
+                            env.end_episode()
+                            
+                            # Save video if recording and we have frames
+                            if save_video and frames_to_save:
+                                episode_id = getattr(env.replay_buffer, 'n_episodes', 0)
+                                video_filename = f'policy_cameras_reset_{episode_id:03d}.mp4'
+                                video_path = pathlib.Path(output) / video_filename
+                                print(f"Saving reset video with {len(frames_to_save)} frames to {video_path}")
+                                imageio.mimsave(str(video_path), frames_to_save, 
+                                              fps=10, codec='libx264')
+                                frames_to_save = []  # Reset for next episode
+                            
+                            # Reset policy state
+                            policy.reset()
+                            
+                            # Move robot to initial position
+                            env.robot.reset_to_initial_position()
+                            
+                            # Wait a moment for robot to settle
+                            time.sleep(5.0)
+                            
+                            # Start new episode
+                            start_delay = 1.0
+                            eval_t_start = time.time() + start_delay
+                            t_start = time.monotonic() + start_delay
+                            env.start_episode(eval_t_start)
+                            precise_wait(eval_t_start - frame_latency, time_func=time.time)
+                            
+                            # Reset iteration counter
+                            iter_idx = 0
+                            term_area_start_timestamp = float('inf')
+                            
+                            print('Robot reset complete! Starting new trajectory.')
+                            continue
 
                         # auto termination
                         terminate = False
@@ -384,4 +421,5 @@ def main(input, output, robot_ip, match_dataset, match_episode,
 
 # %%
 if __name__ == '__main__':
+
     main()

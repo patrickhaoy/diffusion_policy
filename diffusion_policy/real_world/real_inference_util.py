@@ -84,6 +84,7 @@ def get_real_obs_ours(
             # plt.axis('off')
             # plt.show()
         else:
+            # Pass through all non-rgb observations (including ee_pose)
             obs_dict_np[key] = env_obs[key]
 
     return obs_dict_np
