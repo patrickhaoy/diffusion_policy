@@ -259,6 +259,7 @@ def main(input, output, robot_ip, match_dataset, match_episode,
                         current_joints = env.get_robot_state()['ActualQ']
                         joint_deltas = action[:, :6] * action_scale  # Scale relative joint actions
                         gripper_actions = action[:, 6:7]  # Keep gripper as-is
+                        print(action)
                         
                         # Compute absolute joint targets by adding deltas to current position
                         absolute_joint_targets = current_joints + joint_deltas
