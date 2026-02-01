@@ -4,6 +4,7 @@ Loads trajectory from zarr dataset, initializes robot to first state,
 and replays actions to verify they look reasonable.
 
 Compares achieved joint positions with dataset and generates comparison plots.
+Also compares sim vs real images side by side.
 """
 import os
 import sys
@@ -12,6 +13,7 @@ import click
 import numpy as np
 import zarr
 import torch
+import json
 from pathlib import Path
 from multiprocessing.managers import SharedMemoryManager
 
@@ -19,6 +21,110 @@ from multiprocessing.managers import SharedMemoryManager
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from diffusion_policy.real_world.real_env import RealEnv
+
+
+def plot_image_comparison(sim_images, real_images, output_path, episode, camera_name='front_rgb', num_samples=5):
+    """Plot side-by-side comparison of sim and real images."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    
+    n_steps = len(sim_images)
+    # Sample evenly spaced frames
+    indices = np.linspace(0, n_steps - 1, num_samples, dtype=int)
+    
+    fig, axes = plt.subplots(2, num_samples, figsize=(4 * num_samples, 8))
+    
+    for i, idx in enumerate(indices):
+        # Sim image (top row)
+        sim_img = sim_images[idx]
+        if sim_img.dtype == np.uint8:
+            sim_img = sim_img.astype(np.float32) / 255.0
+        axes[0, i].imshow(sim_img)
+        axes[0, i].set_title(f'Sim t={idx}')
+        axes[0, i].axis('off')
+        
+        # Real image (bottom row)
+        if idx < len(real_images):
+            real_img = real_images[idx]
+            if real_img.dtype == np.uint8:
+                real_img = real_img.astype(np.float32) / 255.0
+            axes[1, i].imshow(real_img)
+            
+            axes[1, i].set_title(f'Real t={idx}')
+        else:
+            axes[1, i].text(0.5, 0.5, 'N/A', ha='center', va='center')
+        axes[1, i].axis('off')
+    
+    axes[0, 0].set_ylabel('Simulation', fontsize=14)
+    axes[1, 0].set_ylabel('Real Robot', fontsize=14)
+    
+    plt.suptitle(f'{camera_name} - Sim vs Real Comparison (Episode {episode})', fontsize=16)
+    plt.tight_layout()
+    
+    plot_path = output_path / f'image_comparison_{camera_name}_ep{episode}.png'
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"Saved image comparison: {plot_path}")
+    return plot_path
+
+
+def plot_all_cameras_comparison(sim_images_dict, real_images_dict, output_path, episode, num_samples=5):
+    """Plot comparison for all three cameras in one figure."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    
+    camera_names = ['front_rgb', 'side_rgb', 'wrist_rgb']
+    available_cams = [c for c in camera_names if c in sim_images_dict and c in real_images_dict]
+    
+    if not available_cams:
+        print("No cameras available for comparison")
+        return None
+    
+    n_cams = len(available_cams)
+    n_steps = len(sim_images_dict[available_cams[0]])
+    indices = np.linspace(0, n_steps - 1, num_samples, dtype=int)
+    
+    fig, axes = plt.subplots(n_cams * 2, num_samples, figsize=(3 * num_samples, 4 * n_cams))
+    
+    for cam_idx, cam_name in enumerate(available_cams):
+        sim_images = sim_images_dict[cam_name]
+        real_images = real_images_dict.get(cam_name, [])
+        
+        for i, idx in enumerate(indices):
+            # Sim image
+            row_sim = cam_idx * 2
+            sim_img = sim_images[idx]
+            if sim_img.dtype == np.uint8:
+                sim_img = sim_img.astype(np.float32) / 255.0
+            axes[row_sim, i].imshow(sim_img)
+            if i == 0:
+                axes[row_sim, i].set_ylabel(f'{cam_name}\n(Sim)', fontsize=10)
+            axes[row_sim, i].set_title(f't={idx}' if cam_idx == 0 else '')
+            axes[row_sim, i].axis('off')
+            
+            # Real image
+            row_real = cam_idx * 2 + 1
+            if idx < len(real_images):
+                real_img = real_images[idx]
+                if real_img.dtype == np.uint8:
+                    real_img = real_img.astype(np.float32) / 255.0
+                axes[row_real, i].imshow(real_img)
+            else:
+                axes[row_real, i].text(0.5, 0.5, 'N/A', ha='center', va='center', transform=axes[row_real, i].transAxes)
+            if i == 0:
+                axes[row_real, i].set_ylabel(f'{cam_name}\n(Real)', fontsize=10)
+            axes[row_real, i].axis('off')
+    
+    plt.suptitle(f'Sim vs Real Camera Comparison (Episode {episode})', fontsize=14)
+    plt.tight_layout()
+    
+    plot_path = output_path / f'all_cameras_comparison_ep{episode}.png'
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"Saved all cameras comparison: {plot_path}")
+    return plot_path
 
 
 def plot_comparison(dataset_joints, real_joints, real_target_joints, sim_target_joints, times, output_path, episode):
@@ -75,6 +181,49 @@ def plot_comparison(dataset_joints, real_joints, real_target_joints, sim_target_
     plt.close()
     print(f"Saved comparison plot: {plot_path}")
     
+    return plot_path
+
+
+def plot_ee_comparison(sim_ee, real_ee, times, output_path, episode):
+    """Plot EE pose comparison between sim and real."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+    
+    labels = ['X', 'Y', 'Z']
+    
+    # Position comparison (top row)
+    for i in range(3):
+        ax = axes[0, i]
+        ax.plot(times, sim_ee[:, i] * 1000, 'b-', label='Sim', linewidth=2)
+        ax.plot(times, real_ee[:, i] * 1000, 'r-', label='Real', linewidth=2)
+        ax.set_xlabel('Time (s)')
+        ax.set_ylabel('Position (mm)')
+        ax.set_title(f'EE Position - {labels[i]}')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+    
+    # Rotation comparison (bottom row)
+    rot_labels = ['RX', 'RY', 'RZ']
+    for i in range(3):
+        ax = axes[1, i]
+        ax.plot(times, np.degrees(sim_ee[:, i+3]), 'b-', label='Sim', linewidth=2)
+        ax.plot(times, np.degrees(real_ee[:, i+3]), 'r-', label='Real', linewidth=2)
+        ax.set_xlabel('Time (s)')
+        ax.set_ylabel('Rotation (deg)')
+        ax.set_title(f'EE Rotation - {rot_labels[i]}')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+    
+    plt.suptitle(f'End-Effector Pose Comparison (Episode {episode})', fontsize=16)
+    plt.tight_layout()
+    
+    plot_path = output_path / f'ee_comparison_ep{episode}.png'
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"Saved EE comparison plot: {plot_path}")
     return plot_path
 
 
@@ -163,11 +312,23 @@ def compute_metrics(dataset_joints, real_joints, target_joints=None):
               help='Treat actions as relative joint deltas (add to current real pos)')
 @click.option('--sim_relative', is_flag=True, default=False,
               help='Compute targets relative to sim joint pos (same targets as sim)')
+@click.option('--action_mode', default='joint', type=click.Choice(['joint', 'cartesian_ik']),
+              help='Action mode: joint (direct joint targets) or cartesian_ik (Cartesian delta with IK)')
+@click.option('--tcp_offset', default='0.1345,0,0,0,0,0', type=str,
+              help='TCP offset from flange [x,y,z,rx,ry,rz] (default matches robotiq gripper)')
 @click.option('--dry_run', is_flag=True, default=False,
               help='Print actions without executing on robot')
 @click.option('--output', '-o', default='replay_output',
               help='Output directory for replay data')
-def main(dataset, robot_ip, episode, frequency, action_scale, relative_actions, sim_relative, dry_run, output):
+def main(dataset, robot_ip, episode, frequency, action_scale, relative_actions, sim_relative, 
+         action_mode, tcp_offset, dry_run, output):
+    # Hardcoded IK parameters (matching simulation config)
+    ik_lambda = 0.1
+    ik_scale_parsed = (0.02, 0.02, 0.02, 0.02, 0.02, 0.2)
+    
+    # Z offset between sim world frame and real robot base frame
+    # (sim world origin is ~150mm below robot base)
+    SIM_TO_REAL_Z_OFFSET = 0.150  # meters
     # Load zarr dataset
     zarr_path = os.path.join(dataset, 'rgb0.zarr')
     if not os.path.exists(zarr_path):
@@ -196,6 +357,19 @@ def main(dataset, robot_ip, episode, frequency, action_scale, relative_actions, 
     # Load data for this episode
     actions = root['data/actions'][start_idx:end_idx]
     arm_joint_pos = root['data/obs/arm_joint_pos'][start_idx:end_idx]
+    
+    # Load EE pose for comparison (if available)
+    sim_ee_pose = None
+    if 'end_effector_pose' in root['data/obs']:
+        sim_ee_pose = root['data/obs/end_effector_pose'][start_idx:end_idx]
+        print(f"Loaded end_effector_pose: shape={sim_ee_pose.shape}")
+    
+    # Load sim images for comparison
+    sim_images = {}
+    for cam_key in ['front_rgb', 'side_rgb', 'wrist_rgb']:
+        if cam_key in root['data/obs']:
+            sim_images[cam_key] = root['data/obs'][cam_key][start_idx:end_idx]
+            print(f"Loaded {cam_key}: shape={sim_images[cam_key].shape}")
     
     print(f"\nActions shape: {actions.shape}")
     print(f"Joint positions shape: {arm_joint_pos.shape}")
@@ -250,19 +424,30 @@ def main(dataset, robot_ip, episode, frequency, action_scale, relative_actions, 
         print("  -> Actions appear to be RELATIVE joint deltas")
     
     if dry_run:
-        mode = "SIM_RELATIVE" if sim_relative else ("RELATIVE" if relative_actions else "ABSOLUTE")
-        print(f"\n[DRY RUN] Mode: {mode}. Not executing on robot. Exiting.")
+        mode = f"ACTION_MODE={action_mode}, SIM_RELATIVE={sim_relative}, RELATIVE={relative_actions}"
+        print(f"\n[DRY RUN] {mode}. Not executing on robot. Exiting.")
         return
+    
+    # Parse TCP offset
+    tcp_offset_parsed = [float(x) for x in tcp_offset.split(',')]
+    assert len(tcp_offset_parsed) == 6, f"TCP offset must have 6 values, got {len(tcp_offset_parsed)}"
     
     # Execute on robot
     print(f"\n{'='*60}")
     print("Starting robot execution...")
-    if sim_relative:
-        print("Mode: SIM_RELATIVE - targets = sim_pos[i] + action[i] (same as sim)")
-    elif relative_actions:
-        print("Mode: RELATIVE - targets = current_real_pos + action[i]")
+    print(f"Action mode: {action_mode}")
+    if action_mode == 'cartesian_ik':
+        print(f"  IK lambda: {ik_lambda}")
+        print(f"  IK scale: {ik_scale_parsed}")
+        print(f"  TCP offset: {tcp_offset_parsed}")
+        print("  Actions are Cartesian deltas [dx, dy, dz, drx, dry, drz] (pre-scale)")
     else:
-        print("Mode: ABSOLUTE - targets = action[i]")
+        if sim_relative:
+            print("Mode: SIM_RELATIVE - targets = sim_pos[i] + action[i] (same as sim)")
+        elif relative_actions:
+            print("Mode: RELATIVE - targets = current_real_pos + action[i]")
+        else:
+            print("Mode: ABSOLUTE - targets = action[i]")
     print(f"{'='*60}")
     
     dt = 1.0 / frequency
@@ -272,7 +457,17 @@ def main(dataset, robot_ip, episode, frequency, action_scale, relative_actions, 
     # Storage for comparison
     real_joint_positions = []
     target_joint_positions = []
+    real_ee_poses = []  # Real EE poses for comparison
     real_timestamps = []
+    real_images = {'front_rgb': [], 'side_rgb': [], 'wrist_rgb': []}
+    
+    # Load camera configs
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    configs = [
+        json.load(open(os.path.join(script_dir, "diffusion_policy/real_world/realsense_config/455_front.json"))),
+        json.load(open(os.path.join(script_dir, "diffusion_policy/real_world/realsense_config/435_side.json"))),
+        json.load(open(os.path.join(script_dir, "diffusion_policy/real_world/realsense_config/415_wrist.json")))
+    ]
     
     with SharedMemoryManager() as shm_manager:
         with RealEnv(
@@ -280,15 +475,23 @@ def main(dataset, robot_ip, episode, frequency, action_scale, relative_actions, 
             robot_ip=robot_ip,
             frequency=frequency,
             n_obs_steps=2,
-            obs_image_resolution=(640, 480),
+            obs_image_resolution=(224, 224),  # Match sim image resolution
             max_obs_buffer_size=30,
             obs_float32=False,
             init_joints=True,
             custom_init_joints=init_joints.tolist(),
-            video_capture_fps=30,
-            video_capture_resolution=(640, 480),
+            # Action mode and IK parameters
+            action_mode=action_mode,
+            ik_scale=ik_scale_parsed,  # Scale factors matching sim config
+            ik_lambda=ik_lambda,
+            tcp_offset=tcp_offset_parsed,
+            # Recording
             record_raw_video=True,
             enable_multi_cam_vis=True,
+            camera_serial_numbers=['215122255213', '832112070487', '746112060198'],
+            camera_configs=configs,
+            thread_per_video=3,
+            video_crf=21,
             shm_manager=shm_manager
         ) as env:
             
@@ -309,30 +512,50 @@ def main(dataset, robot_ip, episode, frequency, action_scale, relative_actions, 
             for i, action in enumerate(actions):
                 iter_start = time.time()
                 
-                # Get current state
-                current_joints = np.array(env.get_robot_state()['ActualQ'])
+                # Get current state and observations
+                robot_state = env.get_robot_state()
+                current_joints = np.array(robot_state['ActualQ'])
+                obs = env.get_obs()
                 
-                # Record current position for comparison
+                # Record current joint position for comparison
                 real_joint_positions.append(current_joints.copy())
                 real_timestamps.append(time.time() - t_start)
                 
-                if sim_relative:
-                    # Use same targets as sim: sim_pos[i] + action[i]
-                    joint_targets = arm_joint_pos[i] + action[:6] * action_scale
-                elif relative_actions:
-                    # Treat as relative: add scaled delta to current real pos
-                    joint_targets = current_joints + action[:6] * action_scale
+                # Get real EE pose from RTDE (uses robot's configured TCP)
+                # Then adjust Z to match sim world frame
+                real_tcp = np.array(robot_state.get('ActualTCPPose', robot_state.get('TargetTCPPose', np.zeros(6))))
+                real_ee_pose = real_tcp.copy()
+                real_ee_pose[2] -= SIM_TO_REAL_Z_OFFSET  # Adjust Z to sim frame
+                real_ee_poses.append(real_ee_pose.copy())
+                
+                # Capture real images (take the latest frame)
+                for cam_key in ['front_rgb', 'side_rgb', 'wrist_rgb']:
+                    if cam_key in obs:
+                        # obs[cam_key] shape is (n_obs_steps, H, W, C), take latest
+                        img = obs[cam_key][-1]
+                        real_images[cam_key].append(img.copy())
+                
+                if action_mode == 'cartesian_ik':
+                    # Cartesian IK mode: pass raw Cartesian delta (scale applied in IK controller)
+                    cartesian_delta = action[:6]  # Raw delta, scaling done in controller
+                    gripper_action = action[6]
+                    full_action = np.concatenate([cartesian_delta, [gripper_action]])
+                    target_joint_positions.append(current_joints.copy())  # IK computes internally
                 else:
-                    # Treat as absolute: use action directly (scaled)
-                    joint_targets = action[:6] * action_scale
-                
-                # Record target for comparison
-                target_joint_positions.append(joint_targets.copy())
-                
-                gripper_action = action[6]
-                
-                # Combine into 7D action
-                full_action = np.concatenate([joint_targets, [gripper_action]])
+                    # Joint position mode
+                    if sim_relative:
+                        # Use same targets as sim: sim_pos[i] + action[i]
+                        joint_targets = arm_joint_pos[i] + action[:6] * action_scale
+                    elif relative_actions:
+                        # Treat as relative: add scaled delta to current real pos
+                        joint_targets = current_joints + action[:6] * action_scale
+                    else:
+                        # Treat as absolute: use action directly (scaled)
+                        joint_targets = action[:6] * action_scale
+                    
+                    target_joint_positions.append(joint_targets.copy())
+                    gripper_action = action[6]
+                    full_action = np.concatenate([joint_targets, [gripper_action]])
                 
                 # Compute timestamp for this action
                 action_time = t_start + (i + 1) * dt
@@ -344,10 +567,18 @@ def main(dataset, robot_ip, episode, frequency, action_scale, relative_actions, 
                 )
                 
                 if i % 10 == 0:
-                    print(f"Step {i}/{episode_length}: "
-                          f"target={joint_targets[:3]}, "
-                          f"current={current_joints[:3]}, "
-                          f"gripper={gripper_action:.2f}")
+                    if action_mode == 'cartesian_ik':
+                        scaled_delta = action[:3] * np.array(ik_scale_parsed[:3])
+                        sim_ee = sim_ee_pose[i] if sim_ee_pose is not None else np.zeros(6)
+                        print(f"Step {i}/{episode_length}: "
+                              f"delta=[{scaled_delta[0]*1000:.1f}, {scaled_delta[1]*1000:.1f}, {scaled_delta[2]*1000:.1f}]mm, "
+                              f"real=[{real_ee_pose[0]*1000:.1f}, {real_ee_pose[1]*1000:.1f}, {real_ee_pose[2]*1000:.1f}], "
+                              f"sim=[{sim_ee[0]*1000:.1f}, {sim_ee[1]*1000:.1f}, {sim_ee[2]*1000:.1f}]mm")
+                    else:
+                        print(f"Step {i}/{episode_length}: "
+                              f"target={joint_targets[:3]}, "
+                              f"current={current_joints[:3]}, "
+                              f"gripper={gripper_action:.2f}")
                 
                 # Wait for next step
                 elapsed = time.time() - iter_start
@@ -367,11 +598,15 @@ def main(dataset, robot_ip, episode, frequency, action_scale, relative_actions, 
     # Convert to arrays
     real_joint_positions = np.array(real_joint_positions)
     real_target_positions = np.array(target_joint_positions)
+    real_ee_poses = np.array(real_ee_poses)
     real_timestamps = np.array(real_timestamps)
     
     # Compute sim targets: sim_pos[i] + action[i] (what sim was commanded)
     # Note: sim_target[i] should result in sim ending up at sim_pos[i+1]
-    sim_target_positions = arm_joint_pos[:-1] + actions[:-1, :6] * action_scale
+    if action_mode != 'cartesian_ik':
+        sim_target_positions = arm_joint_pos[:-1] + actions[:-1, :6] * action_scale
+    else:
+        sim_target_positions = arm_joint_pos[:-1]  # For IK mode, not directly comparable
     
     # Align lengths (use shorter of all)
     min_len = min(len(arm_joint_pos) - 1, len(real_joint_positions), len(real_target_positions))
@@ -379,24 +614,87 @@ def main(dataset, robot_ip, episode, frequency, action_scale, relative_actions, 
     real_joints_aligned = real_joint_positions[:min_len]
     real_target_aligned = real_target_positions[:min_len]
     sim_target_aligned = sim_target_positions[:min_len]
+    real_ee_aligned = real_ee_poses[:min_len]
     times_aligned = np.arange(min_len) * dt
+    
+    # Align sim EE poses if available
+    sim_ee_aligned = None
+    if sim_ee_pose is not None:
+        sim_ee_aligned = sim_ee_pose[:min_len]
     
     print(f"\nComparing {min_len} timesteps...")
     
-    # Compute metrics (both target tracking and dataset error)
+    # Compute joint metrics (both target tracking and dataset error)
     metrics = compute_metrics(dataset_joints_aligned, real_joints_aligned, real_target_aligned)
     
-    # Also compute sim tracking metrics for comparison
-    print("\nSIM TARGET TRACKING (Sim Position - Sim Target):")
-    sim_tracking_errors = np.rad2deg(dataset_joints_aligned - sim_target_aligned)
-    print(f"  Overall RMSE: {np.sqrt(np.mean(sim_tracking_errors**2)):.3f} deg")
-    print(f"  Overall Max:  {np.max(np.abs(sim_tracking_errors)):.3f} deg")
+    # Compute EE pose metrics if sim EE pose available
+    if sim_ee_aligned is not None:
+        print("\n" + "="*70)
+        print("END-EFFECTOR POSE COMPARISON")
+        print("="*70)
+        
+        ee_pos_error = real_ee_aligned[:, :3] - sim_ee_aligned[:, :3]
+        ee_rot_error = real_ee_aligned[:, 3:6] - sim_ee_aligned[:, 3:6]
+        
+        pos_rmse = np.sqrt(np.mean(ee_pos_error**2)) * 1000  # mm
+        pos_max = np.max(np.abs(ee_pos_error)) * 1000  # mm
+        rot_rmse = np.sqrt(np.mean(ee_rot_error**2))  # rad
+        rot_max = np.max(np.abs(ee_rot_error))  # rad
+        
+        print(f"Position error (mm):")
+        print(f"  RMSE: {pos_rmse:.2f} mm")
+        print(f"  Max:  {pos_max:.2f} mm")
+        print(f"  Per-axis RMSE: X={np.sqrt(np.mean(ee_pos_error[:, 0]**2))*1000:.2f}, "
+              f"Y={np.sqrt(np.mean(ee_pos_error[:, 1]**2))*1000:.2f}, "
+              f"Z={np.sqrt(np.mean(ee_pos_error[:, 2]**2))*1000:.2f}")
+        
+        print(f"\nRotation error (deg):")
+        print(f"  RMSE: {np.degrees(rot_rmse):.2f} deg")
+        print(f"  Max:  {np.degrees(rot_max):.2f} deg")
+        
+        metrics['ee_pose'] = {
+            'pos_rmse_mm': pos_rmse,
+            'pos_max_mm': pos_max,
+            'rot_rmse_deg': np.degrees(rot_rmse),
+            'rot_max_deg': np.degrees(rot_max),
+        }
+        print("="*70)
+        
+        # Plot EE pose comparison
+        plot_ee_comparison(sim_ee_aligned, real_ee_aligned, times_aligned, output_path, episode)
     
-    # Generate comparison plot with all targets
+    # Also compute sim tracking metrics for comparison (joint mode only)
+    if action_mode != 'cartesian_ik':
+        print("\nSIM TARGET TRACKING (Sim Position - Sim Target):")
+        sim_tracking_errors = np.rad2deg(dataset_joints_aligned - sim_target_aligned)
+        print(f"  Overall RMSE: {np.sqrt(np.mean(sim_tracking_errors**2)):.3f} deg")
+        print(f"  Overall Max:  {np.max(np.abs(sim_tracking_errors)):.3f} deg")
+    
+    # Generate joint comparison plot
     plot_path = plot_comparison(
         dataset_joints_aligned, real_joints_aligned, real_target_aligned, sim_target_aligned,
         times_aligned, output_path, episode
     )
+    
+    # Generate image comparison plots
+    if sim_images and real_images:
+        # Convert real_images lists to arrays
+        real_images_arrays = {}
+        for cam_key in real_images:
+            if real_images[cam_key]:
+                real_images_arrays[cam_key] = np.array(real_images[cam_key])
+                print(f"Captured {len(real_images[cam_key])} real {cam_key} images")
+        
+        # Plot all cameras comparison
+        plot_all_cameras_comparison(sim_images, real_images_arrays, output_path, episode, num_samples=6)
+        
+        # Also plot individual camera comparisons
+        for cam_key in sim_images:
+            if cam_key in real_images_arrays:
+                plot_image_comparison(
+                    sim_images[cam_key], real_images_arrays[cam_key], 
+                    output_path, episode, camera_name=cam_key, num_samples=6
+                )
     
     # Save data for further analysis
     save_data = {
@@ -404,12 +702,15 @@ def main(dataset, robot_ip, episode, frequency, action_scale, relative_actions, 
         'real_joints': torch.from_numpy(real_joints_aligned).float(),
         'real_target_joints': torch.from_numpy(real_target_aligned).float(),
         'sim_target_joints': torch.from_numpy(sim_target_aligned).float(),
+        'real_ee_poses': torch.from_numpy(real_ee_aligned).float(),
+        'sim_ee_poses': torch.from_numpy(sim_ee_aligned).float() if sim_ee_aligned is not None else None,
         'times': torch.from_numpy(times_aligned).float(),
         'actions': torch.from_numpy(actions[:min_len]).float(),
         'metrics': metrics,
         'episode': episode,
         'frequency': frequency,
         'action_scale': action_scale,
+        'action_mode': action_mode,
         'relative_actions': relative_actions,
         'sim_relative': sim_relative,
     }

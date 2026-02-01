@@ -44,9 +44,14 @@ class RealEnv:
             obs_float32=False,
             # action
             rolling_action_buffer=False,
+            action_mode='joint',  # 'joint' or 'cartesian_ik'
             # robot
             init_joints=True,
-            custom_init_joints=None,  # NEW: Custom initial joint positions
+            custom_init_joints=None,  # Custom initial joint positions
+            # IK parameters (for cartesian_ik mode, matching simulation)
+            ik_scale=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0),
+            ik_lambda=0.1,
+            tcp_offset=None,  # [x, y, z, rx, ry, rz] TCP offset from flange
             # video capture params
             video_capture_fps=30,
             video_capture_resolution=(640,480),
@@ -182,7 +187,11 @@ class RealEnv:
             soft_real_time=False,
             verbose=False,
             receive_keys=None,
-            get_max_k=max_obs_buffer_size
+            get_max_k=max_obs_buffer_size,
+            # IK parameters (for cartesian_ik mode)
+            ik_scale=ik_scale,
+            ik_lambda=ik_lambda,
+            tcp_offset=tcp_offset,
             )
 
         self.realsense = realsense
@@ -193,6 +202,8 @@ class RealEnv:
         self.n_obs_steps = n_obs_steps
         self.max_obs_buffer_size = max_obs_buffer_size
         self.obs_key_map = obs_key_map
+        # action mode
+        self.action_mode = action_mode
         # recording
         self.output_dir = output_dir
         self.video_dir = video_dir
@@ -355,11 +366,15 @@ class RealEnv:
         
         Args:
             actions: Unified robot actions (shape: N x 7) where:
-                - actions[:, :6] = Target joint positions (in radians) for torque control
+                - For action_mode='joint':
+                    actions[:, :6] = Target joint positions (in radians)
+                - For action_mode='cartesian_ik':
+                    actions[:, :6] = Cartesian delta [dx, dy, dz, drx, dry, drz]
                 - actions[:, 6] = Gripper position (<0=closed, >=0=open)
             timestamps: Action timestamps
             stages: Optional stage information
             max_joint_diff: Maximum allowed difference between commanded and current joint positions (in radians)
+                           (only used for action_mode='joint')
         """
         assert self.is_ready
         if not isinstance(actions, np.ndarray):
@@ -373,27 +388,26 @@ class RealEnv:
 
         # Validate action shape
         if actions.shape[-1] != 7:
-            raise ValueError(f"Actions must have 7 dimensions (6 joints + 1 gripper), got shape {actions.shape}")
+            raise ValueError(f"Actions must have 7 dimensions (6 arm + 1 gripper), got shape {actions.shape}")
         
         current_joints = self.robot.get_state()['ActualQ']
-        # Separate joint and gripper actions
-        joint_actions = actions[:, :6]  # Joint positions
+        # Separate arm and gripper actions
+        arm_actions = actions[:, :6]
         # Convert gripper action: <0 is closed, >=0 is open
         gripper_actions = actions[:, 6:7] < 0
 
         # convert action to joint positions
         receive_time = time.time()
         is_new = timestamps > receive_time
-        new_joint_actions = joint_actions[is_new]
+        new_arm_actions = arm_actions[is_new]
         new_gripper_actions = gripper_actions[is_new]
         new_actions = actions[is_new]
         new_timestamps = timestamps[is_new]
         new_stages = stages[is_new]
 
-        # Check joint position differences for new actions
-        if len(new_joint_actions) > 0:
-            # Only check the latest action that will be executed
-            latest_joint_action = new_joint_actions[-1]
+        # Safety check for joint mode only
+        if self.action_mode == 'joint' and len(new_arm_actions) > 0:
+            latest_joint_action = new_arm_actions[-1]
             joint_diff = np.abs(latest_joint_action - current_joints)
             max_diff = np.max(joint_diff)
             if max_diff > max_joint_diff:
@@ -402,12 +416,21 @@ class RealEnv:
                     f"Action joints: {latest_joint_action}, Current joints: {current_joints}"
                 )
 
-        # schedule waypoints for torque control
-        for i in range(len(new_joint_actions)):
-            self.robot.joint_torque_control(
-                target_joints=new_joint_actions[i],
-                close_gripper=new_gripper_actions[i]
-            )
+        # Execute actions based on mode
+        for i in range(len(new_arm_actions)):
+            if self.action_mode == 'cartesian_ik':
+                # Send Cartesian delta command (IK computed in controller process)
+                self.robot.cartesian_ik_control(
+                    cartesian_delta=new_arm_actions[i],
+                    close_gripper=new_gripper_actions[i]
+                )
+            else:
+                # Default: joint position control
+                self.robot.joint_torque_control(
+                    target_joints=new_arm_actions[i],
+                    close_gripper=new_gripper_actions[i]
+                )
+        
         if self.action_accumulator is not None:
             self.action_accumulator.put(
                 new_actions,  # Store the full 7D actions

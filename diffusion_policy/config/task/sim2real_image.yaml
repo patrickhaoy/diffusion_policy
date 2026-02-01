@@ -2,15 +2,15 @@ name: sim2real_image
 
 shape_meta: &shape_meta
   obs:
-    front_rgb:
-      shape: [3, 224, 224]
-      type: rgb
-    side_rgb:
-      shape: [3, 224, 224]
-      type: rgb
-    wrist_rgb:
-      shape: [3, 224, 224]
-      type: rgb
+    # front_rgb:
+    #   shape: [3, 224, 224]
+    #   type: rgb
+    # side_rgb:
+    #   shape: [3, 224, 224]
+    #   type: rgb
+    # wrist_rgb:
+    #   shape: [3, 224, 224]
+    #   type: rgb
     # end_effector_pose:
     #   shape: [6] #[9]
     #   type: low_dim
@@ -22,6 +22,9 @@ shape_meta: &shape_meta
     #   type: low_dim
     last_gripper_action:
       shape: [1]
+      type: low_dim
+    last_arm_joint_pos_target:
+      shape: [6]
       type: low_dim
     # right_inner_finger_contact_force:
     #   shape: [3]
@@ -44,15 +47,15 @@ shape_meta: &shape_meta
     # end_effector_pose:
     #   shape: [7]
     #   type: low_dim
-    # insertive_asset_pose:
-    #   shape: [6]
-    #   type: low_dim
-    # receptive_asset_pose:
-    #   shape: [6]
-    #   type: low_dim
-    # insertive_asset_in_receptive_asset_frame:
-    #   shape: [6]
-    #   type: low_dim
+    insertive_asset_pose:
+      shape: [6]
+      type: low_dim
+    receptive_asset_pose:
+      shape: [6]
+      type: low_dim
+    insertive_asset_in_receptive_asset_frame:
+      shape: [6]
+      type: low_dim
   action:
     shape: [7]
   # auxiliary_obs:
