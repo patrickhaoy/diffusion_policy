@@ -11,15 +11,15 @@ shape_meta: &shape_meta
     wrist_rgb:
       shape: [3, 224, 224]
       type: rgb
-    # end_effector_pose:
-    #   shape: [6] #[9]
-    #   type: low_dim
+    end_effector_pose:
+      shape: [6] #[9]
+      type: low_dim
     arm_joint_pos:
       shape: [6]
       type: low_dim
-    # last_arm_action:
-    #   shape: [6]
-    #   type: low_dim
+    last_arm_action:
+      shape: [6]
+      type: low_dim
     last_gripper_action:
       shape: [1]
       type: low_dim
