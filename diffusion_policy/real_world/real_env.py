@@ -22,6 +22,7 @@ from diffusion_policy.common.cv2_util import (
 DEFAULT_OBS_KEY_MAP = {
     # robot
     'ActualQ': 'arm_joint_pos',
+    'ActualTCPPose': 'end_effector_pose',  # EE pose [x,y,z,rx,ry,rz] from robot
     # timestamps
     'step_idx': 'step_idx',
     'timestamp': 'timestamp'
@@ -44,14 +45,15 @@ class RealEnv:
             obs_float32=False,
             # action
             rolling_action_buffer=False,
-            action_mode='joint',  # 'joint' or 'cartesian_ik'
+            action_mode='joint',  # 'joint' or 'cartesian' (direct Cartesian OSC)
             # robot
             init_joints=True,
             custom_init_joints=None,  # Custom initial joint positions
-            # IK parameters (for cartesian_ik mode, matching simulation)
-            ik_scale=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0),
-            ik_lambda=0.1,
-            tcp_offset=None,  # [x, y, z, rx, ry, rz] TCP offset from flange
+            # OSC parameters
+            osc_kp_pos=1000.0,
+            osc_kp_rot=50.0,
+            osc_damping_ratio_pos=1.0,
+            osc_damping_ratio_rot=1.0,
             # video capture params
             video_capture_fps=30,
             video_capture_resolution=(640,480),
@@ -188,10 +190,11 @@ class RealEnv:
             verbose=False,
             receive_keys=None,
             get_max_k=max_obs_buffer_size,
-            # IK parameters (for cartesian_ik mode)
-            ik_scale=ik_scale,
-            ik_lambda=ik_lambda,
-            tcp_offset=tcp_offset,
+            # OSC parameters
+            osc_kp_pos=osc_kp_pos,
+            osc_kp_rot=osc_kp_rot,
+            osc_damping_ratio_pos=osc_damping_ratio_pos,
+            osc_damping_ratio_rot=osc_damping_ratio_rot,
             )
 
         self.realsense = realsense
@@ -202,7 +205,6 @@ class RealEnv:
         self.n_obs_steps = n_obs_steps
         self.max_obs_buffer_size = max_obs_buffer_size
         self.obs_key_map = obs_key_map
-        # action mode
         self.action_mode = action_mode
         # recording
         self.output_dir = output_dir
@@ -328,6 +330,7 @@ class RealEnv:
                 robot_timestamps
             )
 
+        # last_arm_action / last_gripper_action: from action buffer (pre-scale when exec_actions called with obs_actions)
         last_actions = dict()
         if self.action_buffer is not None and len(self.action_buffer) > 0:
             last_actions_raw = np.zeros((self.n_obs_steps, 7), dtype=np.float32)
@@ -360,21 +363,24 @@ class RealEnv:
             actions: np.ndarray, 
             timestamps: np.ndarray, 
             stages: Optional[np.ndarray]=None,
-            max_joint_diff: float = 10.0):
+            obs_actions: Optional[np.ndarray]=None):
         """
-        Execute unified robot actions using joint torque PD control.
-        
+        Execute unified robot actions using OSC torque control.
+
+        last_arm_action / last_gripper_action in get_obs() come from the action buffer.
+        If obs_actions is provided, that (raw/pre-scale) is stored in the buffer and used
+        for recording; otherwise actions is stored.
+
         Args:
-            actions: Unified robot actions (shape: N x 7) where:
-                - For action_mode='joint':
-                    actions[:, :6] = Target joint positions (in radians)
-                - For action_mode='cartesian_ik':
-                    actions[:, :6] = Cartesian delta [dx, dy, dz, drx, dry, drz]
+            actions: Unified robot actions (shape: N x 7) to execute:
+                - action_mode='joint':  actions[:, :6] = target joint positions (rad)
+                - action_mode='cartesian': actions[:, :6] = pre-scaled Cartesian delta
+                    [dx, dy, dz, drx, dry, drz] (meters / axis-angle rad)
                 - actions[:, 6] = Gripper position (<0=closed, >=0=open)
             timestamps: Action timestamps
             stages: Optional stage information
-            max_joint_diff: Maximum allowed difference between commanded and current joint positions (in radians)
-                           (only used for action_mode='joint')
+            obs_actions: Optional (shape: N x 7). If set, stored in action buffer and
+                accumulators so last_arm_action in obs is pre-scale; actions are still executed.
         """
         assert self.is_ready
         if not isinstance(actions, np.ndarray):
@@ -390,13 +396,12 @@ class RealEnv:
         if actions.shape[-1] != 7:
             raise ValueError(f"Actions must have 7 dimensions (6 arm + 1 gripper), got shape {actions.shape}")
         
-        current_joints = self.robot.get_state()['ActualQ']
         # Separate arm and gripper actions
         arm_actions = actions[:, :6]
         # Convert gripper action: <0 is closed, >=0 is open
         gripper_actions = actions[:, 6:7] < 0
 
-        # convert action to joint positions
+        # Filter to future actions only
         receive_time = time.time()
         is_new = timestamps > receive_time
         new_arm_actions = arm_actions[is_new]
@@ -405,35 +410,34 @@ class RealEnv:
         new_timestamps = timestamps[is_new]
         new_stages = stages[is_new]
 
-        # Safety check for joint mode only
-        if self.action_mode == 'joint' and len(new_arm_actions) > 0:
-            latest_joint_action = new_arm_actions[-1]
-            joint_diff = np.abs(latest_joint_action - current_joints)
-            max_diff = np.max(joint_diff)
-            if max_diff > max_joint_diff:
-                raise ValueError(
-                    f"Joint position difference too large: {max_diff:.4f} rad > {max_joint_diff} rad. "
-                    f"Action joints: {latest_joint_action}, Current joints: {current_joints}"
-                )
-
-        # Execute actions based on mode
+        # Execute actions via OSC
         for i in range(len(new_arm_actions)):
-            if self.action_mode == 'cartesian_ik':
-                # Send Cartesian delta command (IK computed in controller process)
-                self.robot.cartesian_ik_control(
+            if self.action_mode == 'cartesian':
+                self.robot.cartesian_osc_control(
                     cartesian_delta=new_arm_actions[i],
                     close_gripper=new_gripper_actions[i]
                 )
             else:
-                # Default: joint position control
                 self.robot.joint_torque_control(
                     target_joints=new_arm_actions[i],
                     close_gripper=new_gripper_actions[i]
                 )
         
+        # Store pre-scale (obs_actions) in buffer/accumulators when provided
+        to_store = new_actions
+        if obs_actions is not None:
+            obs_actions = np.array(obs_actions)
+            if obs_actions.shape[-1] != 7:
+                raise ValueError(f"obs_actions must have 7 dimensions, got shape {obs_actions.shape}")
+            if obs_actions.shape[0] == actions.shape[0]:
+                to_store = obs_actions[is_new]
+            else:
+                to_store = obs_actions[-len(new_actions):]
+            assert len(to_store) == len(new_actions), "obs_actions length must match executed actions"
+
         if self.action_accumulator is not None:
             self.action_accumulator.put(
-                new_actions,  # Store the full 7D actions
+                to_store,
                 new_timestamps
             )
         if self.stage_accumulator is not None:
@@ -442,8 +446,7 @@ class RealEnv:
                 new_timestamps
             )
         if self.action_buffer is not None:
-            # Store the last n_obs_steps actions in a rolling buffer
-            for action in new_actions:
+            for action in to_store:
                 self.action_buffer.append(action)
 
     def get_robot_state(self):

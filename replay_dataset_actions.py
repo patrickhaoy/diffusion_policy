@@ -312,23 +312,12 @@ def compute_metrics(dataset_joints, real_joints, target_joints=None):
               help='Treat actions as relative joint deltas (add to current real pos)')
 @click.option('--sim_relative', is_flag=True, default=False,
               help='Compute targets relative to sim joint pos (same targets as sim)')
-@click.option('--action_mode', default='joint', type=click.Choice(['joint', 'cartesian_ik']),
-              help='Action mode: joint (direct joint targets) or cartesian_ik (Cartesian delta with IK)')
-@click.option('--tcp_offset', default='0.1345,0,0,0,0,0', type=str,
-              help='TCP offset from flange [x,y,z,rx,ry,rz] (default matches robotiq gripper)')
 @click.option('--dry_run', is_flag=True, default=False,
               help='Print actions without executing on robot')
 @click.option('--output', '-o', default='replay_output',
               help='Output directory for replay data')
 def main(dataset, robot_ip, episode, frequency, action_scale, relative_actions, sim_relative, 
-         action_mode, tcp_offset, dry_run, output):
-    # Hardcoded IK parameters (matching simulation config)
-    ik_lambda = 0.1
-    ik_scale_parsed = (0.02, 0.02, 0.02, 0.02, 0.02, 0.2)
-    
-    # Z offset between sim world frame and real robot base frame
-    # (sim world origin is ~150mm below robot base)
-    SIM_TO_REAL_Z_OFFSET = 0.150  # meters
+         dry_run, output):
     # Load zarr dataset
     zarr_path = os.path.join(dataset, 'rgb0.zarr')
     if not os.path.exists(zarr_path):
@@ -424,30 +413,19 @@ def main(dataset, robot_ip, episode, frequency, action_scale, relative_actions, 
         print("  -> Actions appear to be RELATIVE joint deltas")
     
     if dry_run:
-        mode = f"ACTION_MODE={action_mode}, SIM_RELATIVE={sim_relative}, RELATIVE={relative_actions}"
+        mode = f"SIM_RELATIVE={sim_relative}, RELATIVE={relative_actions}"
         print(f"\n[DRY RUN] {mode}. Not executing on robot. Exiting.")
         return
-    
-    # Parse TCP offset
-    tcp_offset_parsed = [float(x) for x in tcp_offset.split(',')]
-    assert len(tcp_offset_parsed) == 6, f"TCP offset must have 6 values, got {len(tcp_offset_parsed)}"
     
     # Execute on robot
     print(f"\n{'='*60}")
     print("Starting robot execution...")
-    print(f"Action mode: {action_mode}")
-    if action_mode == 'cartesian_ik':
-        print(f"  IK lambda: {ik_lambda}")
-        print(f"  IK scale: {ik_scale_parsed}")
-        print(f"  TCP offset: {tcp_offset_parsed}")
-        print("  Actions are Cartesian deltas [dx, dy, dz, drx, dry, drz] (pre-scale)")
+    if sim_relative:
+        print("Mode: SIM_RELATIVE - targets = sim_pos[i] + action[i] (same as sim)")
+    elif relative_actions:
+        print("Mode: RELATIVE - targets = current_real_pos + action[i]")
     else:
-        if sim_relative:
-            print("Mode: SIM_RELATIVE - targets = sim_pos[i] + action[i] (same as sim)")
-        elif relative_actions:
-            print("Mode: RELATIVE - targets = current_real_pos + action[i]")
-        else:
-            print("Mode: ABSOLUTE - targets = action[i]")
+        print("Mode: ABSOLUTE - targets = action[i]")
     print(f"{'='*60}")
     
     dt = 1.0 / frequency
@@ -480,11 +458,6 @@ def main(dataset, robot_ip, episode, frequency, action_scale, relative_actions, 
             obs_float32=False,
             init_joints=True,
             custom_init_joints=init_joints.tolist(),
-            # Action mode and IK parameters
-            action_mode=action_mode,
-            ik_scale=ik_scale_parsed,  # Scale factors matching sim config
-            ik_lambda=ik_lambda,
-            tcp_offset=tcp_offset_parsed,
             # Recording
             record_raw_video=True,
             enable_multi_cam_vis=True,
@@ -522,11 +495,8 @@ def main(dataset, robot_ip, episode, frequency, action_scale, relative_actions, 
                 real_timestamps.append(time.time() - t_start)
                 
                 # Get real EE pose from RTDE (uses robot's configured TCP)
-                # Then adjust Z to match sim world frame
                 real_tcp = np.array(robot_state.get('ActualTCPPose', robot_state.get('TargetTCPPose', np.zeros(6))))
-                real_ee_pose = real_tcp.copy()
-                real_ee_pose[2] -= SIM_TO_REAL_Z_OFFSET  # Adjust Z to sim frame
-                real_ee_poses.append(real_ee_pose.copy())
+                real_ee_poses.append(real_tcp.copy())
                 
                 # Capture real images (take the latest frame)
                 for cam_key in ['front_rgb', 'side_rgb', 'wrist_rgb']:
@@ -535,27 +505,20 @@ def main(dataset, robot_ip, episode, frequency, action_scale, relative_actions, 
                         img = obs[cam_key][-1]
                         real_images[cam_key].append(img.copy())
                 
-                if action_mode == 'cartesian_ik':
-                    # Cartesian IK mode: pass raw Cartesian delta (scale applied in IK controller)
-                    cartesian_delta = action[:6]  # Raw delta, scaling done in controller
-                    gripper_action = action[6]
-                    full_action = np.concatenate([cartesian_delta, [gripper_action]])
-                    target_joint_positions.append(current_joints.copy())  # IK computes internally
+                # Joint position mode
+                if sim_relative:
+                    # Use same targets as sim: sim_pos[i] + action[i]
+                    joint_targets = arm_joint_pos[i] + action[:6] * action_scale
+                elif relative_actions:
+                    # Treat as relative: add scaled delta to current real pos
+                    joint_targets = current_joints + action[:6] * action_scale
                 else:
-                    # Joint position mode
-                    if sim_relative:
-                        # Use same targets as sim: sim_pos[i] + action[i]
-                        joint_targets = arm_joint_pos[i] + action[:6] * action_scale
-                    elif relative_actions:
-                        # Treat as relative: add scaled delta to current real pos
-                        joint_targets = current_joints + action[:6] * action_scale
-                    else:
-                        # Treat as absolute: use action directly (scaled)
-                        joint_targets = action[:6] * action_scale
-                    
-                    target_joint_positions.append(joint_targets.copy())
-                    gripper_action = action[6]
-                    full_action = np.concatenate([joint_targets, [gripper_action]])
+                    # Treat as absolute: use action directly (scaled)
+                    joint_targets = action[:6] * action_scale
+                
+                target_joint_positions.append(joint_targets.copy())
+                gripper_action = action[6]
+                full_action = np.concatenate([joint_targets, [gripper_action]])
                 
                 # Compute timestamp for this action
                 action_time = t_start + (i + 1) * dt
@@ -567,18 +530,10 @@ def main(dataset, robot_ip, episode, frequency, action_scale, relative_actions, 
                 )
                 
                 if i % 10 == 0:
-                    if action_mode == 'cartesian_ik':
-                        scaled_delta = action[:3] * np.array(ik_scale_parsed[:3])
-                        sim_ee = sim_ee_pose[i] if sim_ee_pose is not None else np.zeros(6)
-                        print(f"Step {i}/{episode_length}: "
-                              f"delta=[{scaled_delta[0]*1000:.1f}, {scaled_delta[1]*1000:.1f}, {scaled_delta[2]*1000:.1f}]mm, "
-                              f"real=[{real_ee_pose[0]*1000:.1f}, {real_ee_pose[1]*1000:.1f}, {real_ee_pose[2]*1000:.1f}], "
-                              f"sim=[{sim_ee[0]*1000:.1f}, {sim_ee[1]*1000:.1f}, {sim_ee[2]*1000:.1f}]mm")
-                    else:
-                        print(f"Step {i}/{episode_length}: "
-                              f"target={joint_targets[:3]}, "
-                              f"current={current_joints[:3]}, "
-                              f"gripper={gripper_action:.2f}")
+                    print(f"Step {i}/{episode_length}: "
+                          f"target={joint_targets[:3]}, "
+                          f"current={current_joints[:3]}, "
+                          f"gripper={gripper_action:.2f}")
                 
                 # Wait for next step
                 elapsed = time.time() - iter_start
@@ -603,10 +558,7 @@ def main(dataset, robot_ip, episode, frequency, action_scale, relative_actions, 
     
     # Compute sim targets: sim_pos[i] + action[i] (what sim was commanded)
     # Note: sim_target[i] should result in sim ending up at sim_pos[i+1]
-    if action_mode != 'cartesian_ik':
-        sim_target_positions = arm_joint_pos[:-1] + actions[:-1, :6] * action_scale
-    else:
-        sim_target_positions = arm_joint_pos[:-1]  # For IK mode, not directly comparable
+    sim_target_positions = arm_joint_pos[:-1] + actions[:-1, :6] * action_scale
     
     # Align lengths (use shorter of all)
     min_len = min(len(arm_joint_pos) - 1, len(real_joint_positions), len(real_target_positions))
@@ -663,12 +615,11 @@ def main(dataset, robot_ip, episode, frequency, action_scale, relative_actions, 
         # Plot EE pose comparison
         plot_ee_comparison(sim_ee_aligned, real_ee_aligned, times_aligned, output_path, episode)
     
-    # Also compute sim tracking metrics for comparison (joint mode only)
-    if action_mode != 'cartesian_ik':
-        print("\nSIM TARGET TRACKING (Sim Position - Sim Target):")
-        sim_tracking_errors = np.rad2deg(dataset_joints_aligned - sim_target_aligned)
-        print(f"  Overall RMSE: {np.sqrt(np.mean(sim_tracking_errors**2)):.3f} deg")
-        print(f"  Overall Max:  {np.max(np.abs(sim_tracking_errors)):.3f} deg")
+    # Compute sim tracking metrics for comparison
+    print("\nSIM TARGET TRACKING (Sim Position - Sim Target):")
+    sim_tracking_errors = np.rad2deg(dataset_joints_aligned - sim_target_aligned)
+    print(f"  Overall RMSE: {np.sqrt(np.mean(sim_tracking_errors**2)):.3f} deg")
+    print(f"  Overall Max:  {np.max(np.abs(sim_tracking_errors)):.3f} deg")
     
     # Generate joint comparison plot
     plot_path = plot_comparison(
@@ -710,7 +661,6 @@ def main(dataset, robot_ip, episode, frequency, action_scale, relative_actions, 
         'episode': episode,
         'frequency': frequency,
         'action_scale': action_scale,
-        'action_mode': action_mode,
         'relative_actions': relative_actions,
         'sim_relative': sim_relative,
     }

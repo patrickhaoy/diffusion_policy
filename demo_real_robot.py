@@ -44,13 +44,6 @@ from diffusion_policy.real_world.keystroke_counter import (
 from diffusion_policy.real_world.mello_teleop import MelloTeleopInterface, DummyMelloTeleopInterface
 
 
-def compute_pd_torque(target_joints, curr_joints, curr_vel, torque_kp, torque_kd, torque_max):
-    """Compute PD torque for logging (matches rtde_interpolation_controller.py)."""
-    q_err = np.array(target_joints) - np.array(curr_joints)
-    torque_d = -torque_kd * np.array(curr_vel)
-    torque_target = torque_kp * q_err + torque_d
-    return np.clip(torque_target, -torque_max, torque_max)
-
 @click.command()
 @click.option('--output', '-o', required=True, help="Directory to save demonstration dataset.")
 @click.option('--robot_ip', '-ri', required=True, help="UR5's IP address e.g. 192.168.0.204")
@@ -61,7 +54,9 @@ def compute_pd_torque(target_joints, curr_joints, curr_vel, torque_kp, torque_kd
 @click.option('--command_latency', '-cl', default=0.01, type=float, help="Latency between receiving command to executing on Robot in Sec.")
 @click.option('--debug', is_flag=True, help="Use dummy Mello interface with fixed joint positions for testing.")
 @click.option('--pace_output', '-po', default='data/pace_teleop', help="Directory to save PACE trajectory data.")
-def main(output, robot_ip, mello_port, vis_camera_idx, init_joints, frequency, command_latency, debug, pace_output):
+@click.option('--osc_kp_pos', default=1000.0, type=float, help="OSC position stiffness (default 1000)")
+@click.option('--osc_kp_rot', default=50.0, type=float, help="OSC rotation stiffness (default 50)")
+def main(output, robot_ip, mello_port, vis_camera_idx, init_joints, frequency, command_latency, debug, pace_output, osc_kp_pos, osc_kp_rot):
 
     configs = [
         json.load(open("diffusion_policy/real_world/realsense_config/"
@@ -95,7 +90,10 @@ def main(output, robot_ip, mello_port, vis_camera_idx, init_joints, frequency, c
                 thread_per_video=3,
                 # video recording quality, lower is better (but slower).
                 video_crf=21,
-                shm_manager=shm_manager
+                shm_manager=shm_manager,
+                # OSC parameters
+                osc_kp_pos=osc_kp_pos,
+                osc_kp_rot=osc_kp_rot,
             ) as env:
             cv2.setNumThreads(1)
 
@@ -103,22 +101,20 @@ def main(output, robot_ip, mello_port, vis_camera_idx, init_joints, frequency, c
             pace_output_path = Path(pace_output)
             pace_output_path.mkdir(parents=True, exist_ok=True)
             
-            # PD control parameters (must match rtde_interpolation_controller.py)
-            torque_max = np.array([150.0, 150.0, 150.0, 28.0, 28.0, 28.0])
-            torque_kp = torque_max / np.array([1, 1, 1, 1, 1, 1])  # Lower stiffness
-            torque_kd = torque_max / (np.pi * 0.5)
-            
             # PACE recording state
             is_pace_recording = False
             pace_record_type = None  # 'train' or 'val'
             pace_data = {
                 'time': [], 'joint_pos': [], 'joint_vel': [],
-                'joint_target': [], 'torque_cmd': []
+                'joint_target': []
             }
             pace_train_count = len(list(pace_output_path.glob('train_*.pt')))
             pace_val_count = len(list(pace_output_path.glob('val_*.pt')))
 
             time.sleep(1.0)
+            kd_pos = 2 * np.sqrt(osc_kp_pos) * 1.0
+            kd_rot = 2 * np.sqrt(osc_kp_rot) * 1.0
+            print(f'OSC: Kp_pos={osc_kp_pos}, Kp_rot={osc_kp_rot}, Kd_pos={kd_pos:.1f}, Kd_rot={kd_rot:.1f}')
             print('Ready!')
             print(f'PACE output directory: {pace_output_path}')
             print(f'  Existing train trajectories: {pace_train_count}')
@@ -188,7 +184,7 @@ def main(output, robot_ip, mello_port, vis_camera_idx, init_joints, frequency, c
                             pace_record_type = 'train'
                             pace_t_start = time.time()
                             pace_data = {'time': [], 'joint_pos': [], 'joint_vel': [],
-                                        'joint_target': [], 'torque_cmd': []}
+                                        'joint_target': []}
                             print('PACE TRAIN recording started!')
                         else:
                             # Save and stop
@@ -202,10 +198,6 @@ def main(output, robot_ip, mello_port, vis_camera_idx, init_joints, frequency, c
                                     'joint_pos': torch.from_numpy(np.array(pace_data['joint_pos'])).float(),
                                     'joint_vel': torch.from_numpy(np.array(pace_data['joint_vel'])).float(),
                                     'action': torch.from_numpy(np.array(pace_data['joint_target'])).float(),
-                                    'torque_cmd': torch.from_numpy(np.array(pace_data['torque_cmd'])).float(),
-                                    'torque_kp': torch.from_numpy(torque_kp).float(),
-                                    'torque_kd': torch.from_numpy(torque_kd).float(),
-                                    'torque_max': torch.from_numpy(torque_max).float(),
                                     'log_frequency': frequency,
                                     'n_samples': len(pace_data['time']),
                                 }
@@ -220,7 +212,7 @@ def main(output, robot_ip, mello_port, vis_camera_idx, init_joints, frequency, c
                             pace_record_type = 'val'
                             pace_t_start = time.time()
                             pace_data = {'time': [], 'joint_pos': [], 'joint_vel': [],
-                                        'joint_target': [], 'torque_cmd': []}
+                                        'joint_target': []}
                             print('PACE VALIDATION recording started!')
                         else:
                             # Save and stop
@@ -234,10 +226,6 @@ def main(output, robot_ip, mello_port, vis_camera_idx, init_joints, frequency, c
                                     'joint_pos': torch.from_numpy(np.array(pace_data['joint_pos'])).float(),
                                     'joint_vel': torch.from_numpy(np.array(pace_data['joint_vel'])).float(),
                                     'action': torch.from_numpy(np.array(pace_data['joint_target'])).float(),
-                                    'torque_cmd': torch.from_numpy(np.array(pace_data['torque_cmd'])).float(),
-                                    'torque_kp': torch.from_numpy(torque_kp).float(),
-                                    'torque_kd': torch.from_numpy(torque_kd).float(),
-                                    'torque_max': torch.from_numpy(torque_max).float(),
                                     'log_frequency': frequency,
                                     'n_samples': len(pace_data['time']),
                                 }
@@ -333,17 +321,10 @@ def main(output, robot_ip, mello_port, vis_camera_idx, init_joints, frequency, c
                     curr_vel = np.array(robot_state["ActualQd"])
                     target_joints = unified_action[:6]  # Joint targets being sent
                     
-                    # Compute torque command (for logging, actual torque computed in controller)
-                    torque_cmd = compute_pd_torque(
-                        target_joints, curr_joints, curr_vel,
-                        torque_kp, torque_kd, torque_max
-                    )
-                    
                     pace_data['time'].append(time.time() - pace_t_start)
                     pace_data['joint_pos'].append(curr_joints.copy())
                     pace_data['joint_vel'].append(curr_vel.copy())
                     pace_data['joint_target'].append(target_joints.copy())
-                    pace_data['torque_cmd'].append(torque_cmd.copy())
                     
                     # Print progress every 50 samples
                     if len(pace_data['time']) % 50 == 0:

@@ -79,12 +79,14 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
               help="Control frequency in Hz.")
 @click.option('--save_video', is_flag=True, default=False,
               help='Save video of concatenated camera views.')
-@click.option('--action_scale', default=1.0, type=float,
-              help='Scale factor for relative joint actions.')
 def main(input, output, robot_ip, match_dataset, match_episode,
          vis_camera_idx, init_joints, 
          steps_per_inference, max_duration,
-         frequency, save_video, action_scale):
+         frequency, save_video):
+    # Per-axis Cartesian scale matching simulation DiffIK config
+    CARTESIAN_SCALE = np.array([0.02, 0.02, 0.02, 0.02, 0.02, 0.2])
+    print(f"Cartesian OSC scale: {CARTESIAN_SCALE}")
+    
     # load match_dataset
     match_camera_idx = 0
     episode_first_frame_map = dict()
@@ -139,7 +141,6 @@ def main(input, output, robot_ip, match_dataset, match_episode,
     print("n_obs_steps: ", n_obs_steps)
     print("steps_per_inference: ", steps_per_inference)
     print("n_action_steps: ", n_action_steps)
-    print("action_scale: ", action_scale)
 
     with SharedMemoryManager() as shm_manager:
         with Spacemouse(shm_manager=shm_manager) as sm, RealEnv(
@@ -153,6 +154,7 @@ def main(input, output, robot_ip, match_dataset, match_episode,
             enable_multi_cam_vis=True,
             record_raw_video=True,
             rolling_action_buffer=True,
+            action_mode='cartesian',
             camera_serial_numbers=['215122255213', '832112070487',
                                   '746112060198'],
             camera_configs=configs,
@@ -254,16 +256,14 @@ def main(input, output, robot_ip, match_dataset, match_episode,
 
                             # print('Inference latency:', time.time() - s)
                         
-                        # Convert relative joint actions to absolute joint positions
-                        # action shape: (N, 7) where [:, :6] is joint delta, [:, 6] is gripper
-                        current_joints = env.get_robot_state()['ActualQ']
-                        joint_deltas = action[:, :6] * action_scale  # Scale relative joint actions
-                        gripper_actions = action[:, 6:7]  # Keep gripper as-is
-                        print(action)
-                        
-                        # Compute absolute joint targets by adding deltas to current position
-                        absolute_joint_targets = current_joints + joint_deltas
-                        target_actions = np.concatenate([absolute_joint_targets, gripper_actions], axis=1)
+                        # action shape: (N, 7) where [:, :6] is Cartesian delta, [:, 6] is gripper
+                        raw_arm_action = action[:, :6]  # Raw network output (pre-scale)
+                        gripper_actions = action[:, 6:7]
+                        raw_actions = np.concatenate([raw_arm_action, gripper_actions], axis=1)  # for last_arm_action obs
+
+                        # Cartesian OSC: per-axis scale and send directly to OSC
+                        scaled_delta = raw_arm_action * CARTESIAN_SCALE
+                        target_actions = np.concatenate([scaled_delta, gripper_actions], axis=1)
 
                         # deal with timing
                         action_timestamps = (np.arange(len(action), dtype=np.float64)
@@ -274,22 +274,23 @@ def main(input, output, robot_ip, match_dataset, match_episode,
                         if np.sum(is_new) == 0:
                             # exceeded time budget, still do something
                             target_actions = target_actions[[-1]]
+                            raw_actions = raw_actions[[-1]]
                             # schedule on next available step
                             next_step_idx = int(np.ceil((curr_time - eval_t_start) / dt))
                             action_timestamp = eval_t_start + (next_step_idx) * dt
-                            print('Over budget', action_timestamp - curr_time)
                             action_timestamps = np.array([action_timestamp])
                         else:
                             target_actions = target_actions[is_new]
+                            raw_actions = raw_actions[is_new]
                             action_timestamps = action_timestamps[is_new]
-                        
-                        # Execute joint actions with torque control
+
+                        # Execute actions; store raw (pre-scale) in buffer so last_arm_action is raw
                         actions.append(target_actions)
                         env.exec_actions(
                             actions=target_actions[:n_action_steps],
-                            timestamps=action_timestamps[:n_action_steps]
+                            timestamps=action_timestamps[:n_action_steps],
+                            obs_actions=raw_actions[:n_action_steps]
                         )
-                        print(f"Submitted {n_action_steps} steps of actions.")
 
                         # Visualize camera feed for key detection
                         episode_id = env.replay_buffer.n_episodes

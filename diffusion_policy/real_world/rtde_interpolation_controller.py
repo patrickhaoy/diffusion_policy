@@ -168,57 +168,23 @@ def compute_pose_error(ee_pos, ee_quat, ee_pos_des, ee_quat_des):
         w1*z2 + x1*y2 - y1*x2 + z1*w2
     ])
     q_error = q_error / (np.linalg.norm(q_error) + 1e-10)
+    # Ensure positive w for shorter rotation path (avoid 2π vs 0 ambiguity)
+    if q_error[0] < 0:
+        q_error = -q_error
     rot_error = quat_to_axis_angle(q_error)
     return pos_error, rot_error
 
 
-def differential_ik_dls(delta_pose, jacobian, joint_pos, lambda_val=0.1):
-    """Compute joint target using damped least squares IK (matching simulation)."""
-    J = jacobian
-    J_T = J.T
-    lambda_matrix = (lambda_val ** 2) * np.eye(6)
-    delta_joint_pos = J_T @ np.linalg.inv(J @ J_T + lambda_matrix) @ delta_pose
-    return joint_pos + delta_joint_pos
-
-
-class OneShotDifferentialIK:
-    """One-shot differential IK controller matching simulation behavior."""
-    
-    def __init__(self, scale=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0), lambda_val=0.1, tcp_offset=None):
-        self.scale = np.array(scale)
-        self.lambda_val = lambda_val
-        self.tcp_offset = np.array(tcp_offset) if tcp_offset is not None else None
-        
-    def compute(self, delta_command, current_joint_pos):
-        """Compute joint position target from Cartesian delta command."""
-        scaled_delta = delta_command * self.scale
-        T_ee = forward_kinematics(current_joint_pos, self.tcp_offset)
-        ee_pos = T_ee[:3, 3]
-        ee_axis_angle = matrix_to_pose(T_ee)[3:6]
-        ee_quat = axis_angle_to_quat(ee_axis_angle)
-        ee_pos_des, ee_quat_des = apply_delta_pose(ee_pos, ee_quat, scaled_delta)
-        pos_error, rot_error = compute_pose_error(ee_pos, ee_quat, ee_pos_des, ee_quat_des)
-        pose_error = np.concatenate([pos_error, rot_error])
-        jacobian = compute_jacobian(current_joint_pos, self.tcp_offset)
-        target_joint_pos = differential_ik_dls(pose_error, jacobian, current_joint_pos, self.lambda_val)
-        return target_joint_pos
-    
-    def get_current_pose(self, current_joint_pos):
-        """Get current EE pose [x, y, z, rx, ry, rz]."""
-        T_ee = forward_kinematics(current_joint_pos, self.tcp_offset)
-        return matrix_to_pose(T_ee)
-
-
 class Command(enum.Enum):
     STOP = 0
-    JointTorqueControl = 1  # Joint Torque PD Control
-    CartesianIKControl = 2  # Cartesian delta -> IK -> Joint Torque PD
+    JointTorqueControl = 1   # Joint target -> FK -> OSC torque
+    CartesianOSCControl = 2  # Cartesian delta -> direct OSC torque (no IK)
 
 
 class RTDEInterpolationController(mp.Process):
     """
-    Joint torque PD control for UR robot with optional Cartesian IK.
-    This controller runs in a separate process to ensure predictable latency.
+    OSC (Operational Space Control) torque controller for UR robot.
+    Runs in a separate process to ensure predictable latency.
     """
 
     def __init__(self,
@@ -233,10 +199,14 @@ class RTDEInterpolationController(mp.Process):
                  verbose=False,
                  receive_keys=None,
                  get_max_k=128,
-                 # IK parameters (matching simulation)
-                 ik_scale=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0),
-                 ik_lambda=0.1,
                  tcp_offset=None,  # [x, y, z, rx, ry, rz] TCP offset from flange
+                 # OSC parameters
+                 osc_kp_pos=400.0,
+                 osc_kp_rot=20.0,
+                 osc_damping_ratio_pos=1.0,
+                 osc_damping_ratio_rot=1.0,
+                 osc_error_delta_pos=0.05,
+                 osc_error_delta_rot=0.3,
                  ):
         """
         Args:
@@ -245,9 +215,11 @@ class RTDEInterpolationController(mp.Process):
             joints_init_speed: Speed for initial joint movement (rad/s)
             soft_real_time: Enable round-robin scheduling and real-time priority
             verbose: Print debug messages
-            ik_scale: Scale factors for Cartesian IK commands [x, y, z, rx, ry, rz]
-            ik_lambda: DLS damping factor (default 0.1, matching sim)
             tcp_offset: TCP offset from flange [x, y, z, rx, ry, rz]
+            osc_kp_pos: OSC position stiffness
+            osc_kp_rot: OSC rotation stiffness
+            osc_damping_ratio_pos: OSC position damping ratio
+            osc_damping_ratio_rot: OSC rotation damping ratio
         """
         # verify
         assert 0 < frequency <= 500
@@ -255,7 +227,7 @@ class RTDEInterpolationController(mp.Process):
             joints_init = np.array(joints_init)
             assert joints_init.shape == (6,)
 
-        super().__init__(name="RTDETorqueController")
+        super().__init__(name="RTDEOSCController")
         self.robot_ip = robot_ip
         self.gripper_port = gripper_port
         self.frequency = frequency
@@ -264,22 +236,24 @@ class RTDEInterpolationController(mp.Process):
         self.joints_init_speed = joints_init_speed
         self.soft_real_time = soft_real_time
         self.verbose = verbose
-        
-        # IK parameters
-        self.ik_scale = np.array(ik_scale)
-        self.ik_lambda = ik_lambda
         self.tcp_offset = np.array(tcp_offset) if tcp_offset is not None else None
         
-        # PD torque control parameters (same as collect_chirp_data.py)
+        # Torque limits
         self.torque_max = np.array([150.0, 150.0, 150.0, 28.0, 28.0, 28.0], dtype=np.float64)
-        self.torque_kp = self.torque_max / np.array([1, 1, 1, 1, 1, 1], dtype=np.float64)
-        self.torque_kd = self.torque_max / (np.pi * 0.5)
         
-        # build input queue (supports both joint and Cartesian commands)
+        # OSC parameters
+        self.osc_error_delta_pos = osc_error_delta_pos if osc_error_delta_pos > 0 else None
+        self.osc_error_delta_rot = osc_error_delta_rot if osc_error_delta_rot > 0 else None
+        stiffness = np.array([osc_kp_pos]*3 + [osc_kp_rot]*3)
+        damping_ratio = np.array([osc_damping_ratio_pos]*3 + [osc_damping_ratio_rot]*3)
+        self.osc_Kp = np.diag(stiffness)
+        self.osc_Kd = np.diag(2 * np.sqrt(stiffness) * damping_ratio)
+        
+        # build input queue
         example = {
             'cmd': Command.JointTorqueControl.value,
             'target_joints': np.zeros((6,), dtype=np.float64),
-            'cartesian_delta': np.zeros((6,), dtype=np.float64),  # For Cartesian IK control
+            'cartesian_delta': np.zeros((6,), dtype=np.float64),
             'close_gripper': np.zeros((1,), dtype=np.bool_),
         }
         input_queue = SharedMemoryQueue.create_from_examples(
@@ -355,7 +329,8 @@ class RTDEInterpolationController(mp.Process):
     # ========= command methods ============
     def joint_torque_control(self, target_joints, close_gripper):
         """
-        Send joint torque PD control command to the robot.
+        Send joint target for OSC torque control.
+        FK(target_joints) -> desired EE -> OSC torque.
         
         Args:
             target_joints: Array of 6 target joint positions in radians
@@ -372,14 +347,16 @@ class RTDEInterpolationController(mp.Process):
             'close_gripper': np.array([close_gripper], dtype=np.bool_),
         }
         self.input_queue.put(message)
-    
-    def cartesian_ik_control(self, cartesian_delta, close_gripper):
+
+    def cartesian_osc_control(self, cartesian_delta, close_gripper):
         """
-        Send Cartesian delta command with one-shot IK (matching simulation).
+        Send pre-scaled Cartesian delta for direct OSC tracking.
+        desired_EE = FK(current) + delta, then OSC tracks desired_EE.
+        No IK involved -- OSC operates directly in task space.
         
         Args:
-            cartesian_delta: Array of 6 Cartesian deltas [dx, dy, dz, drx, dry, drz]
-                           (position in meters, rotation in axis-angle radians)
+            cartesian_delta: Array of 6 pre-scaled Cartesian deltas
+                [dx, dy, dz, drx, dry, drz] (meters / axis-angle radians)
             close_gripper: Boolean for gripper state
         """
         assert self.is_alive()
@@ -387,7 +364,7 @@ class RTDEInterpolationController(mp.Process):
         assert cartesian_delta.shape == (6,)
 
         message = {
-            'cmd': np.array([Command.CartesianIKControl.value], dtype=np.int32),
+            'cmd': np.array([Command.CartesianOSCControl.value], dtype=np.int32),
             'target_joints': np.zeros((6,), dtype=np.float64),
             'cartesian_delta': cartesian_delta.astype(np.float64),
             'close_gripper': np.array([close_gripper], dtype=np.bool_),
@@ -423,30 +400,51 @@ class RTDEInterpolationController(mp.Process):
     def get_all_state(self):
         return self.ring_buffer.get_all()
     
-    def compute_pd_torque(self, target_joints: np.ndarray, 
-                          curr_joints: np.ndarray, 
-                          curr_vel: np.ndarray) -> np.ndarray:
+    def compute_osc_torque(self, target_joints, curr_joints, curr_vel):
         """
-        Compute PD torque command from joint position error.
-        Matches DCMotor behavior: no position error clipping, only torque clipping.
-        Same implementation as collect_chirp_data.py
+        Compute OSC torque from joint targets: FK(target) -> desired EE, then OSC.
         """
-        # Convert to numpy arrays if needed
-        target_joints = np.array(target_joints, dtype=np.float64)
-        curr_joints = np.array(curr_joints, dtype=np.float64)
-        curr_vel = np.array(curr_vel, dtype=np.float64)
+        T_des = forward_kinematics(target_joints, self.tcp_offset)
+        ee_pos_des = T_des[:3, 3]
+        ee_quat_des = axis_angle_to_quat(matrix_to_pose(T_des)[3:6])
+        return self._osc_torque_from_ee(ee_pos_des, ee_quat_des, curr_joints, curr_vel)
+
+    def _osc_torque_from_ee(self, ee_pos_des, ee_quat_des, curr_joints, curr_vel):
+        """
+        Core OSC torque computation from desired EE pose.
+        tau = J^T @ (Kp @ pose_error + Kd @ (-ee_vel))
+        """
+        # FK for current EE pose
+        T_cur = forward_kinematics(curr_joints, self.tcp_offset)
+        ee_pos_cur = T_cur[:3, 3]
+        ee_quat_cur = axis_angle_to_quat(matrix_to_pose(T_cur)[3:6])
         
-        # Position error
-        q_err = target_joints - curr_joints
+        # Jacobian at current config
+        jacobian = compute_jacobian(curr_joints, self.tcp_offset)
         
-        # PD control: torque = Kp * pos_error - Kd * vel
-        torque_d = -self.torque_kd * curr_vel
-        torque_target = self.torque_kp * q_err + torque_d
+        # Pose error (position + rotation)
+        pos_error, rot_error = compute_pose_error(
+            ee_pos_cur, ee_quat_cur, ee_pos_des, ee_quat_des)
+        pose_error = np.concatenate([pos_error, rot_error])
         
-        # Clamp total torque to max limits (only clipping)
-        torque_target = np.clip(torque_target, -self.torque_max, self.torque_max)
+        # Clip errors to bound maximum task-space force (prevents jamming/spikes)
+        if self.osc_error_delta_pos is not None:
+            pose_error[:3] = np.clip(pose_error[:3], -self.osc_error_delta_pos, self.osc_error_delta_pos)
+        if self.osc_error_delta_rot is not None:
+            pose_error[3:] = np.clip(pose_error[3:], -self.osc_error_delta_rot, self.osc_error_delta_rot)
         
-        return torque_target.astype(float)
+        # EE velocity via J @ qdot
+        ee_vel = jacobian @ curr_vel
+        
+        # Task-space PD: F = Kp @ error + Kd @ (-vel)
+        des_force = self.osc_Kp @ pose_error + self.osc_Kd @ (-ee_vel)
+        
+        # Joint torques: tau = J^T @ F
+        torque = jacobian.T @ des_force
+        
+        # Clamp
+        torque = np.clip(torque, -self.torque_max, self.torque_max)
+        return torque.astype(float)
 
     # ========= main loop in process ============
     def run(self):
@@ -476,16 +474,13 @@ class RTDEInterpolationController(mp.Process):
 
             gripper.activate()
 
-            # Initialize IK controller
-            ik_controller = OneShotDifferentialIK(
-                scale=self.ik_scale,
-                lambda_val=self.ik_lambda,
-                tcp_offset=self.tcp_offset
-            )
-
             # main loop
             curr_joints = rtde_r.getActualQ()
             current_target_joints = np.array(curr_joints, dtype=np.float64)
+            # Cartesian target (set when CartesianOSCControl is used)
+            current_target_ee_pos = None
+            current_target_ee_quat = None
+            use_cartesian_target = False
             current_gripper_close = False
             current_gripper_state = 'open'
 
@@ -498,12 +493,14 @@ class RTDEInterpolationController(mp.Process):
                 curr_joints = np.array(rtde_r.getActualQ(), dtype=np.float64)
                 curr_vel = np.array(rtde_r.getActualQd(), dtype=np.float64)
                 
-                # Compute PD torque command
-                torque_cmd = self.compute_pd_torque(
-                    current_target_joints, 
-                    curr_joints, 
-                    curr_vel
-                )
+                # Compute OSC torque command
+                if use_cartesian_target and current_target_ee_pos is not None:
+                    torque_cmd = self._osc_torque_from_ee(
+                        current_target_ee_pos, current_target_ee_quat,
+                        curr_joints, curr_vel)
+                else:
+                    torque_cmd = self.compute_osc_torque(
+                        current_target_joints, curr_joints, curr_vel)
                 
                 # Send torque command
                 ok = rtde_c.directTorque(torque_cmd.tolist(), friction_comp=False)
@@ -550,20 +547,26 @@ class RTDEInterpolationController(mp.Process):
                             # stop immediately, ignore later commands
                             break
                         elif cmd == Command.JointTorqueControl.value:
-                            # Update target joint positions for torque control
+                            # Joint target -> FK -> OSC
                             current_target_joints = np.array(command['target_joints'], dtype=np.float64)
+                            use_cartesian_target = False
                             current_gripper_close = command['close_gripper'][0] if isinstance(command['close_gripper'], np.ndarray) else command['close_gripper']
                             if self.verbose:
-                                print("[RTDETorqueController] New torque control "
-                                      f"target:{current_target_joints}")
-                        elif cmd == Command.CartesianIKControl.value:
-                            # Compute joint target from Cartesian delta using one-shot IK
-                            cartesian_delta = np.array(command['cartesian_delta'], dtype=np.float64)
-                            current_target_joints = ik_controller.compute(cartesian_delta, curr_joints)
+                                print("[RTDEOSCController] New joint target: "
+                                      f"{current_target_joints}")
+                        elif cmd == Command.CartesianOSCControl.value:
+                            # Cartesian delta -> desired EE -> direct OSC
+                            delta = np.array(command['cartesian_delta'], dtype=np.float64)
+                            T_cur = forward_kinematics(curr_joints, self.tcp_offset)
+                            ee_pos = T_cur[:3, 3]
+                            ee_quat = axis_angle_to_quat(matrix_to_pose(T_cur)[3:6])
+                            current_target_ee_pos, current_target_ee_quat = apply_delta_pose(
+                                ee_pos, ee_quat, delta)
+                            use_cartesian_target = True
                             current_gripper_close = command['close_gripper'][0] if isinstance(command['close_gripper'], np.ndarray) else command['close_gripper']
                             if self.verbose:
-                                print(f"[RTDETorqueController] Cartesian IK: delta={cartesian_delta[:3]}, "
-                                      f"joint_target={current_target_joints}")
+                                print(f"[RTDEOSCController] Cartesian OSC: delta_pos={delta[:3]}, "
+                                      f"target_pos={current_target_ee_pos}")
                         else:
                             keep_running = False
                             break
