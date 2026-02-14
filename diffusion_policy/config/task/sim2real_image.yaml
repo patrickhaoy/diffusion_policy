@@ -11,6 +11,9 @@ shape_meta: &shape_meta
     wrist_rgb:
       shape: [3, 224, 224]
       type: rgb
+    binary_contact:
+      shape: [1]
+      type: low_dim
     end_effector_pose:
       shape: [6] #[9]
       type: low_dim
