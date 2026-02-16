@@ -3,7 +3,6 @@ Test FK comparison: Move robot to dataset joint positions and compare EE poses.
 Verifies that our FK implementation matches the simulation.
 """
 import os
-import sys
 import time
 import click
 import numpy as np
@@ -12,10 +11,9 @@ import zarr
 from rtde_control import RTDEControlInterface
 from rtde_receive import RTDEReceiveInterface
 
-# Import our FK implementation
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from diffusion_policy.real_world.rtde_interpolation_controller import (
-    forward_kinematics, matrix_to_pose
+# Import calibrated FK implementation (REP-103 frame, matching simulation)
+from diffusion_policy.real_world.ur5e_kinematics import (
+    forward_kinematics_calibrated, get_ee_pose, quat_to_axis_angle,
 )
 
 
@@ -84,8 +82,9 @@ def main(dataset, robot_ip, episode, num_samples, tcp_offset, dry_run, calibrate
         
         for idx in indices:
             joints = arm_joint_pos[idx]
-            T_ee = forward_kinematics(joints, tcp_offset_parsed)
-            computed_ee = matrix_to_pose(T_ee)
+            pos, quat = get_ee_pose(joints)
+            aa = quat_to_axis_angle(quat)
+            computed_ee = np.concatenate([pos, aa])
             if sim_ee_pose is not None:
                 sim_ee = sim_ee_pose[idx]
                 pos_err = np.linalg.norm(computed_ee[:3] - sim_ee[:3]) * 1000

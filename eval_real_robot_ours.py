@@ -49,11 +49,51 @@ from diffusion_policy.policy.base_image_policy import BaseImagePolicy
 import imageio
 from scipy.spatial.transform import Rotation as R
 
+# Calibrated FK matching simulation (wrist_3_link in REP-103 base_link frame)
+from diffusion_policy.real_world.ur5e_kinematics import get_ee_pose, quat_to_axis_angle
+
 # Robomimic imports
 import robomimic.utils.torch_utils as TorchUtils
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
+
+def compute_binary_contact(tcp_force, threshold):
+    """Compute binary contact from TCP force/torque sensor.
+    
+    Mirrors sim's binary_force_contact: ||F[:3]|| > threshold -> 1.0 else 0.0.
+    
+    Args:
+        tcp_force: (n_obs_steps, 6) wrench [Fx,Fy,Fz,Tx,Ty,Tz] from UR F/T sensor
+        threshold: Force norm threshold in Newtons
+    Returns:
+        binary_contact: (n_obs_steps, 1) float32
+    """
+    force_norm = np.linalg.norm(tcp_force[:, :3], axis=-1)
+    contact = (force_norm > threshold).astype(np.float32)
+    return contact[:, None]
+
+
+def compute_calibrated_ee_pose(joint_positions):
+    """Compute EE pose using calibrated FK to wrist_3_link (matching simulation).
+    
+    Uses calibrated URDF parameters with 180deg Z base rotation (REP-103 frame).
+    Returns [x, y, z, rx, ry, rz] where rotation is axis-angle, matching sim's
+    target_asset_pose_in_root_asset_frame with rotation_repr='axis_angle'.
+    
+    Args:
+        joint_positions: (n_obs_steps, 6) joint angles in radians
+    Returns:
+        ee_poses: (n_obs_steps, 6) [x, y, z, rx, ry, rz]
+    """
+    n_steps = joint_positions.shape[0]
+    ee_poses = np.zeros((n_steps, 6), dtype=np.float32)
+    for t in range(n_steps):
+        pos, quat = get_ee_pose(joint_positions[t])
+        axis_angle = quat_to_axis_angle(quat)
+        ee_poses[t, :3] = pos
+        ee_poses[t, 3:] = axis_angle
+    return ee_poses
 
 
 @click.command()
@@ -79,10 +119,15 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
               help="Control frequency in Hz.")
 @click.option('--save_video', is_flag=True, default=False,
               help='Save video of concatenated camera views.')
+@click.option('--action_noise', default=0.0, type=float,
+              help='Std of Gaussian noise added to raw arm actions (pre-scale).')
+@click.option('--contact_threshold', default=5.0, type=float,
+              help='Force norm (N) threshold for binary_contact obs. '
+                   'Sim uses 25.0 on joint wrench; real F/T sensor differs.')
 def main(input, output, robot_ip, match_dataset, match_episode,
          vis_camera_idx, init_joints, 
          steps_per_inference, max_duration,
-         frequency, save_video):
+         frequency, save_video, action_noise, contact_threshold):
     # Per-axis Cartesian scale matching simulation DiffIK config
     CARTESIAN_SCALE = np.array([0.02, 0.02, 0.02, 0.02, 0.02, 0.2])
     print(f"Cartesian OSC scale: {CARTESIAN_SCALE}")
@@ -170,7 +215,12 @@ def main(input, output, robot_ip, match_dataset, match_episode,
             time.sleep(5.0)
 
             print("Warming up policy inference")
+            print(f"Contact threshold: {contact_threshold} N")
             obs = env.get_obs()
+            # Override EE pose with calibrated FK (wrist_3_link in REP-103 frame)
+            obs['end_effector_pose'] = compute_calibrated_ee_pose(obs['arm_joint_pos'])
+            if 'tcp_force' in obs:
+                obs['binary_contact'] = compute_binary_contact(obs['tcp_force'], contact_threshold)
 
             with torch.no_grad():
                 policy.reset()
@@ -192,11 +242,20 @@ def main(input, output, robot_ip, match_dataset, match_episode,
             time.sleep(1.0)
             
             # Initialize video recording if enabled
+            video_fps = int(frequency)
+            episode_video_writer = None
+            long_video_writer = None
             if save_video:
-                frames_to_save = []
-                print("Video recording enabled - will save concatenated camera views")
+                long_video_path = pathlib.Path(output) / 'policy_cameras_full.mp4'
+                long_video_writer = imageio.get_writer(
+                    str(long_video_path), fps=video_fps, codec='libx264',
+                    output_params=['-crf', '21', '-preset', 'fast'])
+                print(f"Video recording enabled at {video_fps} fps")
+                print(f"  Continuous video: {long_video_path}")
 
             actions = []
+            gripper_open_steps_remaining = 0
+            GRIPPER_OPEN_DURATION = 5  # timesteps to hold gripper open when 'g' pressed
             
             while True:
                 # ========== policy control loop ==============
@@ -212,6 +271,13 @@ def main(input, output, robot_ip, match_dataset, match_episode,
                     frame_latency = 1/30
                     precise_wait(eval_t_start - frame_latency, time_func=time.time)
                     print("Started!")
+                    if save_video:
+                        episode_id_start = getattr(env.replay_buffer, 'n_episodes', 0)
+                        ep_video_path = pathlib.Path(output) / f'policy_cameras_ep_{episode_id_start:03d}.mp4'
+                        episode_video_writer = imageio.get_writer(
+                            str(ep_video_path), fps=video_fps, codec='libx264',
+                            output_params=['-crf', '21', '-preset', 'fast'])
+                        print(f"  Episode video: {ep_video_path}")
                     iter_idx = 0
                     term_area_start_timestamp = float('inf')
                     while True:
@@ -221,26 +287,27 @@ def main(input, output, robot_ip, match_dataset, match_episode,
                         # get obs
                         obs = env.get_obs()
                         obs_timestamps = obs['timestamp']
-                        # print(f'Obs latency {time.time() - obs_timestamps[-1]}')
+                        # Override EE pose with calibrated FK (wrist_3_link in REP-103 frame)
+                        obs['end_effector_pose'] = compute_calibrated_ee_pose(obs['arm_joint_pos'])
+                        if 'tcp_force' in obs:
+                            obs['binary_contact'] = compute_binary_contact(obs['tcp_force'], contact_threshold)
 
-                        # Capture frames for video if enabled
+                        # Capture frames for video if enabled (streamed to disk in real-time)
                         if save_video:
-                            # Get the latest frame from each camera and concatenate
                             camera_names = ['front_rgb', 'side_rgb', 'wrist_rgb']
                             imgs = []
                             for cam_name in camera_names:
                                 if cam_name in obs:
-                                    # Get the most recent frame (last in time dimension)
-                                    img = obs[cam_name][-1]  # Shape: (H, W, C)
-                                    # Convert from float [0,1] to uint8 [0,255] if needed
+                                    img = obs[cam_name][-1]
                                     if img.dtype == np.float32 or img.dtype == np.float64:
                                         img = (img * 255).clip(0, 255).astype(np.uint8)
                                     imgs.append(img)
-                            
-                            # Concatenate frames horizontally if we have all cameras
                             if len(imgs) == 3:
                                 frame = np.concatenate(imgs, axis=1)
-                                frames_to_save.append(frame)
+                                if episode_video_writer is not None:
+                                    episode_video_writer.append_data(frame)
+                                if long_video_writer is not None:
+                                    long_video_writer.append_data(frame)
 
                         # run inference
                         with torch.no_grad():
@@ -258,7 +325,17 @@ def main(input, output, robot_ip, match_dataset, match_episode,
                         
                         # action shape: (N, 7) where [:, :6] is Cartesian delta, [:, 6] is gripper
                         raw_arm_action = action[:, :6]  # Raw network output (pre-scale)
+                        if action_noise > 0:
+                            raw_arm_action = raw_arm_action + np.random.randn(*raw_arm_action.shape) * action_noise
                         gripper_actions = action[:, 6:7]
+
+                        # Gripper open macro: override policy gripper command
+                        if gripper_open_steps_remaining > 0:
+                            gripper_actions = np.ones_like(gripper_actions)  # >0 = open
+                            gripper_open_steps_remaining -= 1
+                            if gripper_open_steps_remaining == 0:
+                                print("[Gripper macro] done, returning to policy control")
+
                         raw_actions = np.concatenate([raw_arm_action, gripper_actions], axis=1)  # for last_arm_action obs
 
                         # Cartesian OSC: per-axis scale and send directly to OSC
@@ -313,7 +390,10 @@ def main(input, output, robot_ip, match_dataset, match_episode,
 
 
                         key_stroke = cv2.pollKey()
-                        if key_stroke == ord('s'):
+                        if key_stroke == ord('g'):
+                            gripper_open_steps_remaining = GRIPPER_OPEN_DURATION
+                            print(f"[Gripper macro] opening gripper for {GRIPPER_OPEN_DURATION} steps")
+                        elif key_stroke == ord('s'):
                             # Stop episode
                             # Hand control back to human
                             env.end_episode()
@@ -324,15 +404,11 @@ def main(input, output, robot_ip, match_dataset, match_episode,
                             print('Resetting robot for new trajectory...')
                             env.end_episode()
                             
-                            # Save video if recording and we have frames
-                            if save_video and frames_to_save:
-                                episode_id = getattr(env.replay_buffer, 'n_episodes', 0)
-                                video_filename = f'policy_cameras_reset_{episode_id:03d}.mp4'
-                                video_path = pathlib.Path(output) / video_filename
-                                print(f"Saving reset video with {len(frames_to_save)} frames to {video_path}")
-                                imageio.mimsave(str(video_path), frames_to_save, 
-                                              fps=10, codec='libx264')
-                                frames_to_save = []  # Reset for next episode
+                            # Close per-episode video writer
+                            if save_video and episode_video_writer is not None:
+                                episode_video_writer.close()
+                                episode_video_writer = None
+                                print(f"  Episode video saved.")
                             
                             # Reset policy state
                             policy.reset()
@@ -382,17 +458,10 @@ def main(input, output, robot_ip, match_dataset, match_episode,
 
                         if terminate:
                             env.end_episode()
-                            
-                            # Save video if recording and we have frames
-                            if save_video and frames_to_save:
-                                episode_id = getattr(env.replay_buffer, 'n_episodes', 0)
-                                video_filename = f'policy_cameras_episode_{episode_id:03d}.mp4'
-                                video_path = pathlib.Path(output) / video_filename
-                                print(f"Saving video with {len(frames_to_save)} frames to {video_path}")
-                                imageio.mimsave(str(video_path), frames_to_save, 
-                                              fps=10, codec='libx264')
-                                frames_to_save = []  # Reset for next episode
-                            
+                            if save_video and episode_video_writer is not None:
+                                episode_video_writer.close()
+                                episode_video_writer = None
+                                print(f"  Episode video saved.")
                             break
 
                         # wait for execution
@@ -402,21 +471,25 @@ def main(input, output, robot_ip, match_dataset, match_episode,
                 except Exception as e:
                     print(e)
                     print("Interrupted!")
-                    # stop robot.
                     env.end_episode()
-                    
-                    # Save video if recording and we have frames
-                    if save_video and frames_to_save:
-                        episode_id = getattr(env.replay_buffer, 'n_episodes', 0)
-                        video_filename = f'policy_cameras_interrupted_{episode_id:03d}.mp4'
-                        video_path = pathlib.Path(output) / video_filename
-                        print(f"Saving interrupted video with {len(frames_to_save)} frames to {video_path}")
-                        imageio.mimsave(str(video_path), frames_to_save, 
-                                      fps=10, codec='libx264')
-                    
+                    if save_video and episode_video_writer is not None:
+                        episode_video_writer.close()
+                        episode_video_writer = None
+                        print(f"  Episode video saved.")
+                    if save_video and long_video_writer is not None:
+                        long_video_writer.close()
+                        long_video_writer = None
+                        print(f"  Continuous video saved.")
                     break
                 
                 print("Stopped.")
+                if save_video and episode_video_writer is not None:
+                    episode_video_writer.close()
+                    episode_video_writer = None
+                if save_video and long_video_writer is not None:
+                    long_video_writer.close()
+                    long_video_writer = None
+                    print(f"  Continuous video saved.")
 
 
 

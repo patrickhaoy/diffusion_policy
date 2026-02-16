@@ -79,6 +79,7 @@ class MLPImagePolicy(BaseImagePolicy):
         
         # Get action distribution
         dist = self.forward(mlp_input)
+        # action_pred = dist.rsample()
         action_pred = dist.mean  # Use mean instead of sampling for more stable predictions
         action = self.normalizer['action'].unnormalize(action_pred)
         return {

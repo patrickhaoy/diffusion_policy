@@ -12,167 +12,11 @@ from diffusion_policy.shared_memory.shared_memory_queue import (
 from diffusion_policy.shared_memory.shared_memory_ring_buffer import (
     SharedMemoryRingBuffer)
 from diffusion_policy.real_world.robotiq_gripper import RobotiqGripper
-
-
-# ============================================================================
-# UR5e Kinematics (DH Parameters)
-# ============================================================================
-
-# UR5e DH parameters (meters, radians)
-UR5E_DH = {
-    'd': np.array([0.1625, 0, 0, 0.1333, 0.0997, 0.0996]),
-    'a': np.array([0, -0.425, -0.3922, 0, 0, 0]),
-    'alpha': np.array([np.pi/2, 0, 0, np.pi/2, -np.pi/2, 0]),
-}
-
-
-def dh_transform(theta, d, a, alpha):
-    """Compute homogeneous transformation matrix from DH parameters."""
-    ct, st = np.cos(theta), np.sin(theta)
-    ca, sa = np.cos(alpha), np.sin(alpha)
-    return np.array([
-        [ct, -st*ca,  st*sa, a*ct],
-        [st,  ct*ca, -ct*sa, a*st],
-        [0,   sa,     ca,    d],
-        [0,   0,      0,     1]
-    ])
-
-
-def forward_kinematics(joint_angles, tcp_offset=None):
-    """Compute forward kinematics for UR5e."""
-    T = np.eye(4)
-    for i in range(6):
-        Ti = dh_transform(joint_angles[i], UR5E_DH['d'][i], 
-                          UR5E_DH['a'][i], UR5E_DH['alpha'][i])
-        T = T @ Ti
-    if tcp_offset is not None:
-        T_tcp = pose_to_matrix(tcp_offset)
-        T = T @ T_tcp
-    return T
-
-
-def get_all_transforms(joint_angles):
-    """Get transformation matrices from base to each joint frame."""
-    transforms = [np.eye(4)]
-    T = np.eye(4)
-    for i in range(6):
-        Ti = dh_transform(joint_angles[i], UR5E_DH['d'][i],
-                          UR5E_DH['a'][i], UR5E_DH['alpha'][i])
-        T = T @ Ti
-        transforms.append(T.copy())
-    return transforms
-
-
-def compute_jacobian(joint_angles, tcp_offset=None):
-    """Compute geometric Jacobian for UR5e."""
-    transforms = get_all_transforms(joint_angles)
-    T_ee = transforms[-1]
-    if tcp_offset is not None:
-        T_tcp = pose_to_matrix(tcp_offset)
-        T_ee = T_ee @ T_tcp
-    p_ee = T_ee[:3, 3]
-    J = np.zeros((6, 6))
-    for i in range(6):
-        z_i = transforms[i][:3, 2]
-        p_i = transforms[i][:3, 3]
-        J[:3, i] = np.cross(z_i, p_ee - p_i)
-        J[3:, i] = z_i
-    return J
-
-
-def pose_to_matrix(pose):
-    """Convert pose [x, y, z, rx, ry, rz] (axis-angle) to 4x4 matrix."""
-    pos = pose[:3]
-    axis_angle = pose[3:6]
-    angle = np.linalg.norm(axis_angle)
-    if angle < 1e-10:
-        R = np.eye(3)
-    else:
-        axis = axis_angle / angle
-        K = np.array([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]])
-        R = np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * K @ K
-    T = np.eye(4)
-    T[:3, :3] = R
-    T[:3, 3] = pos
-    return T
-
-
-def matrix_to_pose(T):
-    """Convert 4x4 matrix to pose [x, y, z, rx, ry, rz] (axis-angle)."""
-    pos = T[:3, 3]
-    R = T[:3, :3]
-    angle = np.arccos(np.clip((np.trace(R) - 1) / 2, -1, 1))
-    if angle < 1e-10:
-        axis_angle = np.zeros(3)
-    elif np.abs(angle - np.pi) < 1e-10:
-        eigvals, eigvecs = np.linalg.eig(R)
-        idx = np.argmin(np.abs(eigvals - 1))
-        axis = np.real(eigvecs[:, idx])
-        axis_angle = axis * angle
-    else:
-        axis = np.array([R[2, 1] - R[1, 2], R[0, 2] - R[2, 0], R[1, 0] - R[0, 1]]) / (2 * np.sin(angle))
-        axis_angle = axis * angle
-    return np.concatenate([pos, axis_angle])
-
-
-def axis_angle_to_quat(axis_angle):
-    """Convert axis-angle to quaternion [w, x, y, z]."""
-    angle = np.linalg.norm(axis_angle)
-    if angle < 1e-10:
-        return np.array([1.0, 0.0, 0.0, 0.0])
-    axis = axis_angle / angle
-    w = np.cos(angle / 2)
-    xyz = axis * np.sin(angle / 2)
-    return np.array([w, xyz[0], xyz[1], xyz[2]])
-
-
-def quat_to_axis_angle(quat):
-    """Convert quaternion [w, x, y, z] to axis-angle."""
-    w, x, y, z = quat
-    angle = 2 * np.arccos(np.clip(w, -1, 1))
-    if angle < 1e-10:
-        return np.zeros(3)
-    s = np.sin(angle / 2)
-    if s < 1e-10:
-        return np.zeros(3)
-    axis = np.array([x, y, z]) / s
-    return axis * angle
-
-
-def apply_delta_pose(ee_pos, ee_quat, delta_pose):
-    """Apply delta pose to current EE pose. Returns (pos_des, quat_des)."""
-    ee_pos_des = ee_pos + delta_pose[:3]
-    delta_quat = axis_angle_to_quat(delta_pose[3:6])
-    w1, x1, y1, z1 = delta_quat
-    w2, x2, y2, z2 = ee_quat
-    ee_quat_des = np.array([
-        w1*w2 - x1*x2 - y1*y2 - z1*z2,
-        w1*x2 + x1*w2 + y1*z2 - z1*y2,
-        w1*y2 - x1*z2 + y1*w2 + z1*x2,
-        w1*z2 + x1*y2 - y1*x2 + z1*w2
-    ])
-    ee_quat_des = ee_quat_des / (np.linalg.norm(ee_quat_des) + 1e-10)
-    return ee_pos_des, ee_quat_des
-
-
-def compute_pose_error(ee_pos, ee_quat, ee_pos_des, ee_quat_des):
-    """Compute pose error (position + axis-angle rotation error)."""
-    pos_error = ee_pos_des - ee_pos
-    q_curr_inv = np.array([ee_quat[0], -ee_quat[1], -ee_quat[2], -ee_quat[3]])
-    w1, x1, y1, z1 = ee_quat_des
-    w2, x2, y2, z2 = q_curr_inv
-    q_error = np.array([
-        w1*w2 - x1*x2 - y1*y2 - z1*z2,
-        w1*x2 + x1*w2 + y1*z2 - z1*y2,
-        w1*y2 - x1*z2 + y1*w2 + z1*x2,
-        w1*z2 + x1*y2 - y1*x2 + z1*w2
-    ])
-    q_error = q_error / (np.linalg.norm(q_error) + 1e-10)
-    # Ensure positive w for shorter rotation path (avoid 2π vs 0 ambiguity)
-    if q_error[0] < 0:
-        q_error = -q_error
-    rot_error = quat_to_axis_angle(q_error)
-    return pos_error, rot_error
+from diffusion_policy.real_world.ur5e_kinematics import (
+    forward_kinematics_calibrated, compute_jacobian_calibrated,
+    get_ee_pose, axis_angle_to_quat, quat_to_axis_angle,
+    apply_delta_pose, compute_pose_error,
+)
 
 
 class Command(enum.Enum):
@@ -268,6 +112,7 @@ class RTDEInterpolationController(mp.Process):
                 'ActualQ',
                 'ActualQd',
                 'ActualTCPPose',  # EE pose from robot's FK
+                'ActualTCPForce',  # 6D wrench [Fx,Fy,Fz,Tx,Ty,Tz] from built-in F/T sensor
             ]
         rtde_r = RTDEReceiveInterface(hostname=robot_ip)
         example = dict()
@@ -404,9 +249,7 @@ class RTDEInterpolationController(mp.Process):
         """
         Compute OSC torque from joint targets: FK(target) -> desired EE, then OSC.
         """
-        T_des = forward_kinematics(target_joints, self.tcp_offset)
-        ee_pos_des = T_des[:3, 3]
-        ee_quat_des = axis_angle_to_quat(matrix_to_pose(T_des)[3:6])
+        ee_pos_des, ee_quat_des = get_ee_pose(target_joints)
         return self._osc_torque_from_ee(ee_pos_des, ee_quat_des, curr_joints, curr_vel)
 
     def _osc_torque_from_ee(self, ee_pos_des, ee_quat_des, curr_joints, curr_vel):
@@ -414,18 +257,15 @@ class RTDEInterpolationController(mp.Process):
         Core OSC torque computation from desired EE pose.
         tau = J^T @ (Kp @ pose_error + Kd @ (-ee_vel))
         """
-        # FK for current EE pose
-        T_cur = forward_kinematics(curr_joints, self.tcp_offset)
-        ee_pos_cur = T_cur[:3, 3]
-        ee_quat_cur = axis_angle_to_quat(matrix_to_pose(T_cur)[3:6])
+        # FK for current EE pose (calibrated, REP-103 frame)
+        ee_pos_cur, ee_quat_cur = get_ee_pose(curr_joints)
         
-        # Jacobian at current config
-        jacobian = compute_jacobian(curr_joints, self.tcp_offset)
+        # Jacobian at current config (calibrated, REP-103 frame)
+        jacobian = compute_jacobian_calibrated(curr_joints)
         
-        # Pose error (position + rotation)
-        pos_error, rot_error = compute_pose_error(
+        # Pose error (6D: position + axis-angle rotation)
+        pose_error = compute_pose_error(
             ee_pos_cur, ee_quat_cur, ee_pos_des, ee_quat_des)
-        pose_error = np.concatenate([pos_error, rot_error])
         
         # Clip errors to bound maximum task-space force (prevents jamming/spikes)
         if self.osc_error_delta_pos is not None:
@@ -557,9 +397,7 @@ class RTDEInterpolationController(mp.Process):
                         elif cmd == Command.CartesianOSCControl.value:
                             # Cartesian delta -> desired EE -> direct OSC
                             delta = np.array(command['cartesian_delta'], dtype=np.float64)
-                            T_cur = forward_kinematics(curr_joints, self.tcp_offset)
-                            ee_pos = T_cur[:3, 3]
-                            ee_quat = axis_angle_to_quat(matrix_to_pose(T_cur)[3:6])
+                            ee_pos, ee_quat = get_ee_pose(curr_joints)
                             current_target_ee_pos, current_target_ee_quat = apply_delta_pose(
                                 ee_pos, ee_quat, delta)
                             use_cartesian_target = True
