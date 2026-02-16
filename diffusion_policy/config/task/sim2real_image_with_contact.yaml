@@ -1,4 +1,4 @@
-name: sim2real_image
+name: sim2real_image_with_contact
 
 shape_meta: &shape_meta
   obs:
@@ -11,6 +11,9 @@ shape_meta: &shape_meta
     wrist_rgb:
       shape: [3, 224, 224]
       type: rgb
+    binary_contact:
+      shape: [1]
+      type: low_dim
     end_effector_pose:
       shape: [6] #[9]
       type: low_dim
@@ -72,7 +75,7 @@ shape_meta: &shape_meta
   #     shape: [7]
   #     type: low_dim
 
-task_name: &task_name sim2real_image
+task_name: &task_name sim2real_image_with_contact
 
 env_runner:
   _target_: diffusion_policy.env_runner.dummy_runner.DummyRunner
