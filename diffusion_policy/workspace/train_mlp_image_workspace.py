@@ -176,7 +176,11 @@ class TrainMLPImageWorkspace(BaseWorkspace):
                             train_sampling_batch = batch
 
                         # compute loss
-                        raw_loss = self.accelerator.unwrap_model(self.model).compute_loss(batch)
+                        loss_output = self.accelerator.unwrap_model(self.model).compute_loss(batch)
+                        if isinstance(loss_output, dict):
+                            raw_loss = loss_output['loss']
+                        else:
+                            raw_loss = loss_output
                         loss = raw_loss / cfg.training.gradient_accumulate_every
                         self.accelerator.backward(loss)
                         if self.global_step % cfg.training.gradient_accumulate_every == 0:
@@ -194,6 +198,9 @@ class TrainMLPImageWorkspace(BaseWorkspace):
                             'epoch': self.epoch,
                             'lr': lr_scheduler.get_last_lr()[0]
                         }
+                        if isinstance(loss_output, dict):
+                            step_log['train_bc_loss'] = loss_output['bc_loss'].item()
+                            step_log['train_aux_loss'] = loss_output['aux_loss'].item()
 
                         is_last_batch = (batch_idx == (len(train_dataloader)-1))
                         if not is_last_batch:
@@ -247,14 +254,16 @@ class TrainMLPImageWorkspace(BaseWorkspace):
                                 leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                             for batch_idx, batch in enumerate(tepoch):
                                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                                loss = self.accelerator.unwrap_model(self.model).compute_loss(batch)
-                                val_losses.append(loss)
+                                loss_output = self.accelerator.unwrap_model(self.model).compute_loss(batch)
+                                if isinstance(loss_output, dict):
+                                    val_losses.append(loss_output['loss'].item())
+                                else:
+                                    val_losses.append(loss_output.item())
                                 if (cfg.training.max_val_steps is not None) \
                                     and batch_idx >= (cfg.training.max_val_steps-1):
                                     break
                         if len(val_losses) > 0:
-                            val_loss = torch.mean(torch.tensor(val_losses)).item()
-                            # log epoch average validation loss
+                            val_loss = np.mean(val_losses)
                             step_log['val_loss'] = val_loss
 
                 # run sampling on a training batch

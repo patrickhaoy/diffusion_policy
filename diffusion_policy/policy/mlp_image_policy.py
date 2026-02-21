@@ -17,6 +17,7 @@ class MLPImagePolicy(BaseImagePolicy):
             n_obs_steps: int,
             hidden_dim: int = 512,
             hidden_depth: int = 4,
+            aux_loss_weight: float = 0.0,
             **kwargs):
         assert n_action_steps == 1, "MLPImagePolicy only supports n_action_steps=1"
         
@@ -31,6 +32,7 @@ class MLPImagePolicy(BaseImagePolicy):
         self.action_dim = action_dim
         self.obs_feature_dim = obs_feature_dim
         self.normalizer = LinearNormalizer()
+        self.aux_loss_weight = aux_loss_weight
         self.kwargs = kwargs
         
         # Input: all obs steps concatenated
@@ -50,15 +52,29 @@ class MLPImagePolicy(BaseImagePolicy):
         
         self.log_std_limits = (-5.0, 2.0)
 
-    def forward(self, obs_features: torch.Tensor) -> Normal:
-        """
-        Returns a Normal(mean, std) distribution over actions given observation features.
-        """
-        h = self.trunk(obs_features)
+        # Auxiliary reconstruction heads branch off encoder features (pre-trunk)
+        # to directly pressure the visual encoder to retain state information
+        self.aux_heads = nn.ModuleDict()
+        auxiliary_shape_meta = shape_meta.get('auxiliary_obs', None)
+        if auxiliary_shape_meta is not None and aux_loss_weight > 0:
+            for key, attr in auxiliary_shape_meta.items():
+                dim = attr['shape'][0]
+                self.aux_heads[key] = nn.Sequential(
+                    nn.Linear(input_dim, hidden_dim),
+                    nn.ReLU(),
+                    nn.Linear(hidden_dim, dim)
+                )
+
+    def get_trunk_features(self, obs_features: torch.Tensor) -> torch.Tensor:
+        return self.trunk(obs_features)
+
+    def get_action_dist(self, h: torch.Tensor) -> Normal:
         mean = self.mean_head(h)
         log_std = self.log_std_head(h).clamp(min=self.log_std_limits[0], max=self.log_std_limits[1])
-        std = torch.exp(log_std)
-        return Normal(mean, std)
+        return Normal(mean, torch.exp(log_std))
+
+    def forward(self, obs_features: torch.Tensor) -> Normal:
+        return self.get_action_dist(self.get_trunk_features(obs_features))
 
     def predict_action(self, obs_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         assert 'past_action' not in obs_dict
@@ -107,13 +123,22 @@ class MLPImagePolicy(BaseImagePolicy):
         nobs_features = nobs_features.reshape(B, To, -1)
         mlp_input = nobs_features.reshape(B, -1)
         
-        # Target: only predict the next n_action_steps
+        h = self.get_trunk_features(mlp_input)
+
+        # BC loss
         assert Ta == 1, "MLPImagePolicy only supports n_action_steps=1"
         target = nactions[:, To-1:To+Ta-1].squeeze()
-        
-        # Get action distribution and compute loss
-        dist = self.forward(mlp_input)
-        log_prob = dist.log_prob(target).sum(dim=-1)
-        loss = -log_prob.mean()
-        
-        return loss 
+        dist = self.get_action_dist(h)
+        bc_loss = -dist.log_prob(target).sum(dim=-1).mean()
+
+        # Auxiliary reconstruction loss (from encoder features, not trunk)
+        aux_loss = torch.tensor(0.0, device=h.device)
+        if self.aux_heads and 'auxiliary_obs' in batch:
+            for key, head in self.aux_heads.items():
+                pred = head(mlp_input)
+                aux_target = self.normalizer[key].normalize(
+                    batch['auxiliary_obs'][key][:, To-1])
+                aux_loss = aux_loss + F.mse_loss(pred, aux_target)
+
+        loss = bc_loss + self.aux_loss_weight * aux_loss
+        return {'loss': loss, 'bc_loss': bc_loss, 'aux_loss': aux_loss}

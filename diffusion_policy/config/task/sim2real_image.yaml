@@ -55,22 +55,16 @@ shape_meta: &shape_meta
     #   type: low_dim
   action:
     shape: [7]
-  # auxiliary_obs:
-  #   # gripper_contact_forces:
-  #   #   shape: [6]
-  #   #   type: low_dim
-  #   end_effector_pose:
-  #     shape: [7]
-  #     type: low_dim
-  #   held_asset_pose:
-  #     shape: [7]
-  #     type: low_dim
-  #   fixed_asset_pose:
-  #     shape: [7]
-  #     type: low_dim
-  #   held_asset_in_fixed_asset_frame:
-  #     shape: [7]
-  #     type: low_dim
+  auxiliary_obs:
+    insertive_asset_pose:
+      shape: [6]
+      type: low_dim
+    receptive_asset_pose:
+      shape: [6]
+      type: low_dim
+    insertive_asset_in_receptive_asset_frame:
+      shape: [6]
+      type: low_dim
 
 task_name: &task_name sim2real_image
 
