@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn as nn
 from diffusion_policy.model.vision.multi_image_obs_encoder import MultiImageObsEncoder
@@ -14,6 +15,23 @@ class SpatialResNet(nn.Module):
 
     def forward(self, x):
         return self.features(x)  # (B, C, H, W)
+
+
+class SpatialViT(nn.Module):
+    """Wrapper that returns spatial feature maps (B, C, H, W) from a timm ViT.
+    Handles CLS and register tokens via num_prefix_tokens."""
+    def __init__(self, vit):
+        super().__init__()
+        self.vit = vit
+        self.embed_dim = vit.embed_dim
+        self.num_prefix = getattr(vit, 'num_prefix_tokens', 0)
+
+    def forward(self, x):
+        tokens = self.vit.forward_features(x)  # (B, prefix+N, D)
+        tokens = tokens[:, self.num_prefix:]   # drop CLS + register tokens
+        B, N, D = tokens.shape
+        H = W = int(math.sqrt(N))
+        return tokens.transpose(1, 2).reshape(B, D, H, W)
 
 
 class CrossViewFusion(nn.Module):
@@ -84,11 +102,16 @@ class CrossViewImageObsEncoder(MultiImageObsEncoder):
                          feature_dim=None, **kwargs)
 
         # Wrap RGB models to return spatial features instead of pooled vectors
+        def _wrap_spatial(model):
+            if hasattr(model, 'forward_features'):
+                return SpatialViT(model)
+            return SpatialResNet(model)
+
         if self.share_rgb_model:
-            self.key_model_map['rgb'] = SpatialResNet(self.key_model_map['rgb'])
+            self.key_model_map['rgb'] = _wrap_spatial(self.key_model_map['rgb'])
         else:
             for key in self.rgb_keys:
-                self.key_model_map[key] = SpatialResNet(self.key_model_map[key])
+                self.key_model_map[key] = _wrap_spatial(self.key_model_map[key])
 
         # Probe spatial output dimensions
         with torch.no_grad():
