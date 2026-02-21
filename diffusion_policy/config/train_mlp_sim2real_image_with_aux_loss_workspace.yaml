@@ -2,7 +2,7 @@ defaults:
   - _self_
   - task: sim2real_image
 
-name: train_mlp_image
+name: train_mlp_image_aux
 _target_: diffusion_policy.workspace.train_mlp_image_workspace.TrainMLPImageWorkspace
 output_dir: null
 
@@ -49,6 +49,7 @@ policy:
   n_obs_steps: ${n_obs_steps}
   hidden_dim: 512
   hidden_depth: 4
+  aux_loss_weight: 1.0
 
 dataloader:
   batch_size: 64
@@ -88,7 +89,7 @@ training:
   use_ema: False
   freeze_encoder: False
   rollout_every: 5000
-  checkpoint_every: 10000  # checkpoint every 10000 gradient steps
+  checkpoint_every: 10000
   val_every: 1
   sample_every: 1
   max_train_steps: null
@@ -124,4 +125,4 @@ hydra:
     dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
   sweep:
     dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
-    subdir: ${hydra.job.num} 
+    subdir: ${hydra.job.num}
