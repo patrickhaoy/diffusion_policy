@@ -33,7 +33,7 @@ policy:
     crop_shape: null
     random_crop: False
     use_group_norm: False
-    share_rgb_model: True
+    share_rgb_model: False
     imagenet_norm: True
     proj_dim: 128
     n_xattn_heads: 4
@@ -55,7 +55,7 @@ policy:
   aux_loss_weight: 1.0
 
 dataloader:
-  batch_size: 64
+  batch_size: 32
   num_workers: 8
   shuffle: True
   pin_memory: True
@@ -64,7 +64,7 @@ dataloader:
   drop_last: True
 
 val_dataloader:
-  batch_size: 64
+  batch_size: 32
   num_workers: 8
   shuffle: False
   pin_memory: True
