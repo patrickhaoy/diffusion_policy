@@ -129,7 +129,7 @@ def main(input, output, robot_ip, match_dataset, match_episode,
          steps_per_inference, max_duration,
          frequency, save_video, action_noise, contact_threshold):
     # Per-axis Cartesian scale matching simulation DiffIK config
-    CARTESIAN_SCALE = np.array([0.02, 0.02, 0.02, 0.02, 0.02, 0.2])
+    CARTESIAN_SCALE = np.array([0.01, 0.01, 0.002, 0.02, 0.02, 0.2])
     print(f"Cartesian OSC scale: {CARTESIAN_SCALE}")
     
     # load match_dataset

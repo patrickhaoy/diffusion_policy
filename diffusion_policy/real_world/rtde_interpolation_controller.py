@@ -45,8 +45,8 @@ class RTDEInterpolationController(mp.Process):
                  get_max_k=128,
                  tcp_offset=None,  # [x, y, z, rx, ry, rz] TCP offset from flange
                  # OSC parameters
-                 osc_kp_pos=400.0,
-                 osc_kp_rot=20.0,
+                 osc_kp_pos=1000.0,
+                 osc_kp_rot=50.0,
                  osc_damping_ratio_pos=1.0,
                  osc_damping_ratio_rot=1.0,
                  osc_error_delta_pos=0.05,
