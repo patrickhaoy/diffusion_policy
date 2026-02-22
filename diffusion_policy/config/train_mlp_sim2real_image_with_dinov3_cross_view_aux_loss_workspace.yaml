@@ -33,7 +33,7 @@ policy:
     crop_shape: null
     random_crop: False
     use_group_norm: False
-    share_rgb_model: False
+    share_rgb_model: True
     imagenet_norm: True
     proj_dim: 128
     n_xattn_heads: 4
