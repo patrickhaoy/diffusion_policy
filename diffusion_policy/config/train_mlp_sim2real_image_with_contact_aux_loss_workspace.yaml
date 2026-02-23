@@ -1,8 +1,8 @@
 defaults:
   - _self_
-  - task: sim2real_image
+  - task: sim2real_image_with_contact
 
-name: train_mlp_image_dinov3
+name: train_mlp_image_contact_aux
 _target_: diffusion_policy.workspace.train_mlp_image_workspace.TrainMLPImageWorkspace
 output_dir: null
 
@@ -26,13 +26,13 @@ policy:
     _target_: diffusion_policy.model.vision.multi_image_obs_encoder.MultiImageObsEncoder
     shape_meta: ${shape_meta}
     rgb_model:
-      _target_: diffusion_policy.model.vision.model_getter.get_dinov3
-      name: vit_small_patch16_dinov3
-      pretrained: True
+      _target_: diffusion_policy.model.vision.model_getter.get_resnet
+      name: resnet18
+      weights: IMAGENET1K_V1
     resize_shape: null
     crop_shape: null
     random_crop: False
-    use_group_norm: False
+    use_group_norm: True
     share_rgb_model: False
     imagenet_norm: True
     extra_randomizations:
@@ -49,9 +49,10 @@ policy:
   n_obs_steps: ${n_obs_steps}
   hidden_dim: 512
   hidden_depth: 4
+  aux_loss_weight: 1.0
 
 dataloader:
-  batch_size: 32
+  batch_size: 64
   num_workers: 8
   shuffle: True
   pin_memory: True
@@ -60,7 +61,7 @@ dataloader:
   drop_last: True
 
 val_dataloader:
-  batch_size: 32
+  batch_size: 64
   num_workers: 8
   shuffle: False
   pin_memory: True
