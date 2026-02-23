@@ -1,4 +1,4 @@
-name: sim2real_image
+name: sim2real_image_with_contact
 
 shape_meta: &shape_meta
   obs:
@@ -11,6 +11,9 @@ shape_meta: &shape_meta
     wrist_rgb:
       shape: [3, 224, 224]
       type: rgb
+    binary_contact:
+      shape: [1]
+      type: low_dim
     end_effector_pose:
       shape: [6] #[9]
       type: low_dim
@@ -23,12 +26,6 @@ shape_meta: &shape_meta
     last_gripper_action:
       shape: [1]
       type: low_dim
-    binary_contact:
-      shape: [1]
-      type: low_dim
-    # last_arm_joint_pos_target:
-    #   shape: [6]
-    #   type: low_dim
     # right_inner_finger_contact_force:
     #   shape: [3]
     #   type: low_dim 
@@ -61,18 +58,24 @@ shape_meta: &shape_meta
     #   type: low_dim
   action:
     shape: [7]
-  auxiliary_obs:
-    insertive_asset_pose:
-      shape: [6]
-      type: low_dim
-    receptive_asset_pose:
-      shape: [6]
-      type: low_dim
-    insertive_asset_in_receptive_asset_frame:
-      shape: [6]
-      type: low_dim
+  # auxiliary_obs:
+  #   # gripper_contact_forces:
+  #   #   shape: [6]
+  #   #   type: low_dim
+  #   end_effector_pose:
+  #     shape: [7]
+  #     type: low_dim
+  #   held_asset_pose:
+  #     shape: [7]
+  #     type: low_dim
+  #   fixed_asset_pose:
+  #     shape: [7]
+  #     type: low_dim
+  #   held_asset_in_fixed_asset_frame:
+  #     shape: [7]
+  #     type: low_dim
 
-task_name: &task_name sim2real_image
+task_name: &task_name sim2real_image_with_contact
 
 env_runner:
   _target_: diffusion_policy.env_runner.dummy_runner.DummyRunner

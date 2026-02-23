@@ -119,15 +119,15 @@ class Sim2RealImageDataset(BaseImageDataset):
         self.lowdim_keys = [
             k for k, v in shape_meta['obs'].items()
             if v.get('type', 'low_dim') == 'low_dim']
+        self.auxiliary_keys = []
         if shape_meta.get('auxiliary_obs', None) is not None:
-            self.lowdim_keys.extend([
-                k for k, v in shape_meta['auxiliary_obs'].items()
-            ])
+            self.auxiliary_keys = [
+                k for k, v in shape_meta['auxiliary_obs'].items()]
 
         # Create key_first_k for performance optimization
         key_first_k = dict()
         if n_obs_steps is not None:
-            for key in self.rgb_keys + self.lowdim_keys:
+            for key in self.rgb_keys + self.lowdim_keys + self.auxiliary_keys:
                 key_first_k[key] = n_obs_steps
 
         # Split train/val
@@ -277,8 +277,9 @@ class Sim2RealImageDataset(BaseImageDataset):
         # don't normalize rgb, obs_encoder has image_net norm
         for key in self.rgb_keys:
             normalizer[key] = SingleFieldLinearNormalizer.create_identity()
-        # for key in self.rgb_keys:
-        #     normalizer[key] = get_image_range_normalizer()
+        for key in self.auxiliary_keys:
+            normalizer[key] = SingleFieldLinearNormalizer.create_fit(
+                self.replay_buffer[key], mode="gaussian")
         return normalizer
 
     def get_all_actions(self) -> torch.Tensor:
@@ -309,12 +310,14 @@ class Sim2RealImageDataset(BaseImageDataset):
             del data[key]
         for key in self.lowdim_keys:
             obs_dict[key] = data[key][T_slice].astype(np.float32)
-            # save ram
+            del data[key]
+
+        aux_dict = dict()
+        for key in self.auxiliary_keys:
+            aux_dict[key] = data[key][T_slice].astype(np.float32)
             del data[key]
 
         action = data['action'].astype(np.float32)
-        # handle latency by dropping first n_latency_steps action
-        # observations are already taken care of by T_slice
         if self.n_latency_steps > 0:
             action = action[self.n_latency_steps:]
 
@@ -322,6 +325,8 @@ class Sim2RealImageDataset(BaseImageDataset):
             'obs': dict_apply(obs_dict, torch.from_numpy),
             'action': torch.from_numpy(action),
         }
+        if aux_dict:
+            torch_data['auxiliary_obs'] = dict_apply(aux_dict, torch.from_numpy)
         return torch_data
 
 

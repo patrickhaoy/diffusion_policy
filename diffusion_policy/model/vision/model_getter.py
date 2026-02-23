@@ -26,3 +26,13 @@ def get_r3m(name, **kwargs):
     resnet_model = r3m_model.convnet
     resnet_model = resnet_model.to('cpu')
     return resnet_model
+
+def get_dinov3(name='vit_small_patch16_dinov3', pretrained=True, **kwargs):
+    """
+    name: vit_small_patch16_dinov3, vit_small_plus_patch16_dinov3,
+          vit_base_patch16_dinov3, vit_large_patch16_dinov3, etc.
+    Returns a ViT that outputs (B, embed_dim) feature vectors.
+    """
+    import timm
+    model = timm.create_model(name, pretrained=pretrained, num_classes=0, **kwargs)
+    return model
