@@ -80,6 +80,64 @@ def generate_validation_waypoints(step_size_m=0.07, rot_step_rad=0.35):
 
 
 # ============================================================================
+# Chirp (Frequency Sweep) Trajectory
+# ============================================================================
+
+def generate_chirp_trajectory(duration=30.0, dt=0.002, f0=0.1, f1=5.0,
+                              pos_amp=0.05, rot_amp=0.15):
+    """
+    Generate a linear chirp (frequency sweep) trajectory in Cartesian space.
+
+    Each of the 6 axes (x,y,z,rx,ry,rz) gets a sinusoidal oscillation whose
+    frequency sweeps from f0 to f1 over the duration.  Phase offsets decouple
+    the axes so all joints are excited simultaneously.
+
+    Args:
+        duration: Total sweep time in seconds
+        dt: Timestep (1/control_freq, e.g. 0.002 for 500Hz)
+        f0: Start frequency in Hz
+        f1: End frequency in Hz
+        pos_amp: Position amplitude in meters per axis
+        rot_amp: Rotation amplitude in radians per axis
+
+    Returns:
+        offsets: (T, 6) array of [dx,dy,dz,drx,dry,drz] offsets from center pose
+        t: (T,) time array
+    """
+    T = int(duration / dt)
+    t = np.linspace(0, duration, T)
+
+    # Linear chirp: instantaneous freq = f0 + (f1-f0)*t/duration
+    phase = 2 * np.pi * (f0 * t + (f1 - f0) / (2 * duration) * t ** 2)
+
+    # Amplitude envelope: ramp up over first 2s, hold, ramp down over last 3s.
+    # Ensures the robot starts and ends at the center pose smoothly.
+    ramp_up_s = 2.0
+    ramp_down_s = 3.0
+    envelope = np.ones(T)
+    ramp_up_n = int(ramp_up_s / dt)
+    ramp_down_n = int(ramp_down_s / dt)
+    envelope[:ramp_up_n] = np.linspace(0, 1, ramp_up_n)
+    envelope[-ramp_down_n:] = np.linspace(1, 0, ramp_down_n)
+
+    # Phase offsets so axes are decoupled (60 deg apart)
+    phase_offsets = [0, np.pi/3, 2*np.pi/3, np.pi, 4*np.pi/3, 5*np.pi/3]
+    #   dx,dy: full pos_amp  (excites base, shoulder)
+    #   dz:    1.5x pos_amp  (reach in/out forces elbow to flex)
+    #   drx:   2x rot_amp    (pitch rotation drives shoulder+elbow)
+    #   dry:   1x rot_amp
+    #   drz:   2x rot_amp    (yaw rotation drives base joint)
+    amps = [pos_amp, pos_amp, pos_amp * 1.5,
+            rot_amp * 2.0, rot_amp, rot_amp * 2.0]
+
+    offsets = np.zeros((T, 6))
+    for i in range(6):
+        offsets[:, i] = amps[i] * envelope * np.sin(phase + phase_offsets[i])
+
+    return offsets, t
+
+
+# ============================================================================
 # Main Test Script
 # ============================================================================
 
@@ -120,7 +178,19 @@ def generate_validation_waypoints(step_size_m=0.07, rot_step_rad=0.35):
               help="Override payload CoG as 'x,y,z' in meters (default: '0.017,-0.007,0.058')")
 @click.option('--val', is_flag=True, default=False,
               help="Use validation trajectory (different pattern & init pose) instead of training")
-def main(robot_ip, step_size, rot_step, hold_time, init_joints, joints_init_deg, print_state, verify_fk, safe, hold_only, hold_duration, output_json, num_waypoints, kp_pos, kp_rot, damping_ratio_pos, damping_ratio_rot, verbose, collect_sysid, payload_mass, payload_cog, val):
+@click.option('--chirp', is_flag=True, default=False,
+              help="Chirp mode: frequency-sweep excitation for broadband sysid")
+@click.option('--chirp_duration', default=8.0, type=float,
+              help="Chirp sweep duration in seconds (default 8)")
+@click.option('--chirp_f0', default=0.1, type=float,
+              help="Chirp start frequency Hz (default 0.1)")
+@click.option('--chirp_f1', default=3.0, type=float,
+              help="Chirp end frequency Hz (default 3.0)")
+@click.option('--chirp_pos_amp', default=0.10, type=float,
+              help="Chirp position amplitude in meters (default 0.10 = 100mm)")
+@click.option('--chirp_rot_amp', default=0.25, type=float,
+              help="Chirp rotation amplitude in radians (default 0.25 = ~14 deg, RZ gets 2x)")
+def main(robot_ip, step_size, rot_step, hold_time, init_joints, joints_init_deg, print_state, verify_fk, safe, hold_only, hold_duration, output_json, num_waypoints, kp_pos, kp_rot, damping_ratio_pos, damping_ratio_rot, verbose, collect_sysid, payload_mass, payload_cog, val, chirp, chirp_duration, chirp_f0, chirp_f1, chirp_pos_amp, chirp_rot_amp):
     """Test Operational Space Control with cube motion pattern."""
     
     # Parse initial joint positions
@@ -423,6 +493,167 @@ def main(robot_ip, step_size, rot_step, hold_time, init_joints, joints_init_deg,
                     
         except KeyboardInterrupt:
             pass
+        finally:
+            try:
+                rtde_c.directTorque([0.0]*6, friction_comp=False)
+                time.sleep(0.1)
+                current_joints = rtde_r.getActualQ()
+                rtde_c.servoJ(current_joints, 0.5, 0.5, 0.1, 0.1, 300)
+                rtde_c.servoStop()
+            except Exception as e:
+                print(f"Cleanup error: {e}")
+            rtde_c.stopScript()
+            rtde_c.disconnect()
+            rtde_r.disconnect()
+            print("Disconnected from robot.")
+        return
+    
+    # ================================================================
+    # Chirp mode — frequency-sweep excitation for broadband sysid
+    # ================================================================
+    if chirp:
+        chirp_offsets, chirp_t = generate_chirp_trajectory(
+            duration=chirp_duration, dt=1.0/control_frequency,
+            f0=chirp_f0, f1=chirp_f1,
+            pos_amp=chirp_pos_amp, rot_amp=chirp_rot_amp)
+        chirp_steps = len(chirp_t)
+        dt = 1.0 / control_frequency
+
+        print("\n" + "="*60)
+        print("Chirp Mode — Frequency Sweep Excitation")
+        print("="*60)
+        print(f"Duration: {chirp_duration:.1f}s  ({chirp_steps} steps at {control_frequency}Hz)")
+        print(f"Frequency: {chirp_f0:.2f} → {chirp_f1:.1f} Hz")
+        print(f"Amplitude: pos={chirp_pos_amp*1000:.0f}mm  rot={np.degrees(chirp_rot_amp):.1f}deg")
+        print(f"Stiffness (Kp): {motion_stiffness}")
+        kp_sqrt = np.sqrt(np.array(motion_stiffness))
+        kd_diag = 2 * kp_sqrt * np.array(motion_damping_ratio)
+        print(f"Damping (Kd):   [{', '.join([f'{x:.1f}' for x in kd_diag])}]")
+        print(f"Torque max:     {torque_max.tolist()}")
+        if collect_sysid:
+            print(f"Sysid output:   {collect_sysid}")
+        print("="*60)
+        print("\nPress 'q' to abort.")
+        print("="*60 + "\n")
+
+        rtde_c = RTDEControlInterface(
+            robot_ip, control_frequency,
+            RTDEControlInterface.FLAG_VERBOSE | RTDEControlInterface.FLAG_UPLOAD_SCRIPT)
+        rtde_r = RTDEReceiveInterface(robot_ip, control_frequency)
+
+        rtde_c.setPayload(pl_mass, pl_cog)
+
+        try:
+            with KeystrokeCounter() as key_counter:
+                if init_joints:
+                    print("Moving to initial joint position...")
+                    ok = rtde_c.moveJ(j_init.tolist(), 1.05, 1.4)
+                    if not ok:
+                        raise RuntimeError("moveJ to initial joints failed")
+                    print("Initial position reached.")
+
+                current_joints = np.array(rtde_r.getActualQ(), dtype=float)
+                center_pos, center_quat = get_ee_pose(current_joints)
+                print(f"Center EE: [{center_pos[0]*1000:.1f}, {center_pos[1]*1000:.1f}, {center_pos[2]*1000:.1f}] mm\n")
+
+                sysid_joint_positions = []
+                sysid_joint_torques = []
+                sysid_tcp_forces = []
+                sysid_initial_joint_pos = current_joints.copy()
+                sysid_waypoints = []
+
+                # Set initial target to center pose
+                osc_controller.set_target(center_pos, center_quat)
+
+                stop = False
+                for step_idx in range(chirp_steps):
+                    t_start = rtde_c.initPeriod()
+
+                    press_events = key_counter.get_press_events()
+                    for ks in press_events:
+                        if ks == KeyCode(char='q'):
+                            print("\nAborted by user.")
+                            stop = True
+                            break
+                    if stop:
+                        break
+
+                    # Compute chirp target: center pose + chirp offset
+                    offset = chirp_offsets[step_idx]
+                    target_pos = center_pos + offset[:3]
+                    target_quat_delta = axis_angle_to_quat(offset[3:6])
+                    w1, x1, y1, z1 = target_quat_delta
+                    w2, x2, y2, z2 = center_quat
+                    target_quat = np.array([
+                        w1*w2 - x1*x2 - y1*y2 - z1*z2,
+                        w1*x2 + x1*w2 + y1*z2 - z1*y2,
+                        w1*y2 - x1*z2 + y1*w2 + z1*x2,
+                        w1*z2 + x1*y2 - y1*x2 + z1*w2])
+                    osc_controller.set_target(target_pos, target_quat)
+
+                    curr_joints = np.array(rtde_r.getActualQ(), dtype=float)
+                    ee_pos, ee_quat = get_ee_pose(curr_joints)
+                    jacobian = compute_jacobian_calibrated(curr_joints)
+                    joint_vel = np.array(rtde_r.getActualQd(), dtype=float)
+                    ee_vel = jacobian @ joint_vel
+
+                    torque_cmd = osc_controller.compute(ee_pos, ee_quat, ee_vel, jacobian)
+                    rtde_c.directTorque(torque_cmd.tolist(), friction_comp=False)
+
+                    if collect_sysid is not None:
+                        sysid_joint_positions.append(curr_joints.copy())
+                        sysid_joint_torques.append(torque_cmd.copy())
+                        sysid_tcp_forces.append(np.array(rtde_r.getActualTCPForce(), dtype=float))
+                        sysid_waypoints.append({
+                            "step_idx": step_idx,
+                            "target_pos": target_pos.copy(),
+                            "target_quat": target_quat.copy(),
+                        })
+
+                    if step_idx % (control_frequency * 2) == 0:
+                        elapsed = step_idx * dt
+                        inst_freq = chirp_f0 + (chirp_f1 - chirp_f0) * elapsed / chirp_duration
+                        pos_err = np.linalg.norm(ee_pos - target_pos)
+                        print(f"  [{elapsed:.1f}s] freq={inst_freq:.2f}Hz  "
+                              f"pos_err={pos_err*1000:.1f}mm  "
+                              f"|tau|={np.linalg.norm(torque_cmd):.1f}Nm  "
+                              f"EE=[{ee_pos[0]*1000:.0f},{ee_pos[1]*1000:.0f},{ee_pos[2]*1000:.0f}]mm")
+
+                    rtde_c.waitPeriod(t_start)
+
+                print(f"\nChirp completed ({chirp_steps} steps).")
+
+                if collect_sysid is not None and len(sysid_joint_positions) > 0:
+                    import torch as _torch
+                    wp_step_indices = [wp["step_idx"] for wp in sysid_waypoints]
+                    wp_target_pos = [wp["target_pos"] for wp in sysid_waypoints]
+                    wp_target_quat = [wp["target_quat"] for wp in sysid_waypoints]
+                    sysid_data = {
+                        "joint_positions": _torch.tensor(np.array(sysid_joint_positions), dtype=_torch.float32),
+                        "joint_torques": _torch.tensor(np.array(sysid_joint_torques), dtype=_torch.float32),
+                        "tcp_forces": _torch.tensor(np.array(sysid_tcp_forces), dtype=_torch.float32),
+                        "initial_joint_pos": _torch.tensor(sysid_initial_joint_pos, dtype=_torch.float32),
+                        "dt": dt,
+                        "control_freq": control_frequency,
+                        "osc_params": {
+                            "motion_stiffness": list(motion_stiffness),
+                            "motion_damping_ratio": list(motion_damping_ratio),
+                            "torque_max": torque_max.tolist(),
+                        },
+                        "chirp_params": {
+                            "duration": chirp_duration,
+                            "f0": chirp_f0, "f1": chirp_f1,
+                            "pos_amp": chirp_pos_amp, "rot_amp": chirp_rot_amp,
+                        },
+                        "num_waypoints": len(sysid_waypoints),
+                        "waypoint_step_indices": _torch.tensor(wp_step_indices, dtype=_torch.long),
+                        "waypoint_target_pos": _torch.tensor(np.array(wp_target_pos), dtype=_torch.float32),
+                        "waypoint_target_quat": _torch.tensor(np.array(wp_target_quat), dtype=_torch.float32),
+                    }
+                    _torch.save(sysid_data, collect_sysid)
+                    print(f"Saved chirp sysid data ({len(sysid_joint_positions)} steps, "
+                          f"{len(sysid_waypoints)} waypoints) to: {collect_sysid}")
+
         finally:
             try:
                 rtde_c.directTorque([0.0]*6, friction_comp=False)
