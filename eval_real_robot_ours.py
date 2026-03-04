@@ -173,8 +173,10 @@ def main(input, output, robot_ip, match_dataset, match_episode,
     if cfg.training.use_ema:
         policy = workspace.ema_model
 
-        policy.eval().to(device)
+    policy.eval().to(device)
 
+    # Diffusion-specific overrides (no-op for MLP policies)
+    if hasattr(policy, 'num_inference_steps'):
         policy.num_inference_steps = 16  # DDIM inference iterations
         policy.n_action_steps = policy.horizon - policy.n_obs_steps + 1
 
@@ -266,10 +268,7 @@ def main(input, output, robot_ip, match_dataset, match_episode,
                     eval_t_start = time.time() + start_delay
                     t_start = time.monotonic() + start_delay
                     env.start_episode(eval_t_start)
-                    # wait for 1/30 sec to get the closest frame actually
-                    # reduces overall latency
-                    frame_latency = 1/30
-                    precise_wait(eval_t_start - frame_latency, time_func=time.time)
+                    precise_wait(eval_t_start, time_func=time.time)
                     print("Started!")
                     if save_video:
                         episode_id_start = getattr(env.replay_buffer, 'n_episodes', 0)
@@ -311,17 +310,13 @@ def main(input, output, robot_ip, match_dataset, match_episode,
 
                         # run inference
                         with torch.no_grad():
-                            s = time.time()
                             obs_dict_np = get_real_obs_ours(
                                 env_obs=obs, shape_meta=cfg['shape_meta']
                             )
                             obs_dict = dict_apply(obs_dict_np,
                                 lambda x: torch.from_numpy(x).unsqueeze(0).to(device))
                             result = policy.predict_action(obs_dict)
-                            # this action starts from the first obs step
-                            action = result['action'][0:1].detach().to('cpu').numpy() 
-
-                            # print('Inference latency:', time.time() - s)
+                            action = result['action'][0:1].detach().to('cpu').numpy()
                         
                         # action shape: (N, 7) where [:, :6] is Cartesian delta, [:, 6] is gripper
                         raw_arm_action = action[:, :6]  # Raw network output (pre-scale)
@@ -424,7 +419,7 @@ def main(input, output, robot_ip, match_dataset, match_episode,
                             eval_t_start = time.time() + start_delay
                             t_start = time.monotonic() + start_delay
                             env.start_episode(eval_t_start)
-                            precise_wait(eval_t_start - frame_latency, time_func=time.time)
+                            precise_wait(eval_t_start, time_func=time.time)
                             
                             # Reset iteration counter
                             iter_idx = 0
@@ -465,7 +460,7 @@ def main(input, output, robot_ip, match_dataset, match_episode,
                             break
 
                         # wait for execution
-                        precise_wait(t_cycle_end - frame_latency)
+                        precise_wait(t_cycle_end)
                         iter_idx += steps_per_inference
 
                 except Exception as e:
