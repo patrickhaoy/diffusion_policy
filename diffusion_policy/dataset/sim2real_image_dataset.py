@@ -59,6 +59,7 @@ class Sim2RealImageDataset(BaseImageDataset):
         pad_after=0,
         n_obs_steps=None,
         n_latency_steps=0,
+        max_image_latency_steps=0,
         seed=42,
         val_ratio=0.0,
         use_cache: bool = False,
@@ -128,7 +129,7 @@ class Sim2RealImageDataset(BaseImageDataset):
         key_first_k = dict()
         if n_obs_steps is not None:
             for key in self.rgb_keys + self.lowdim_keys + self.auxiliary_keys:
-                key_first_k[key] = n_obs_steps
+                key_first_k[key] = n_obs_steps + max_image_latency_steps
 
         # Split train/val
         val_mask = get_val_mask(
@@ -140,7 +141,7 @@ class Sim2RealImageDataset(BaseImageDataset):
         # Create sampler
         self.sampler = SequenceSampler(
             replay_buffer=self.replay_buffer,
-            sequence_length=horizon + n_latency_steps,
+            sequence_length=horizon + n_latency_steps + max_image_latency_steps,
             pad_before=pad_before,
             pad_after=pad_after,
             episode_mask=train_mask,
@@ -150,6 +151,7 @@ class Sim2RealImageDataset(BaseImageDataset):
         self.horizon = horizon
         self.n_obs_steps = n_obs_steps
         self.n_latency_steps = n_latency_steps
+        self.max_image_latency_steps = max_image_latency_steps
         self.pad_before = pad_before
         self.pad_after = pad_after
         self.val_ratio = val_ratio
@@ -258,10 +260,11 @@ class Sim2RealImageDataset(BaseImageDataset):
         val_set = copy.copy(self)
         val_set.sampler = SequenceSampler(
             replay_buffer=self.replay_buffer,
-            sequence_length=self.horizon + self.n_latency_steps,
+            sequence_length=self.horizon + self.n_latency_steps + self.max_image_latency_steps,
             pad_before=self.pad_before,
             pad_after=self.pad_after,
             episode_mask=self.val_mask)
+        val_set.max_image_latency_steps = 0
         val_set.val_mask = ~self.val_mask
         return val_set
 
@@ -292,34 +295,30 @@ class Sim2RealImageDataset(BaseImageDataset):
         threadpool_limits(1)
         data = self.sampler.sample_sequence(idx)
 
-        # to save RAM, only return first n_obs_steps of OBS
-        # since the rest will be discarded anyway.
-        # when self.n_obs_steps is None
-        # this slice does nothing (takes all)
-        T_slice = slice(self.n_obs_steps)
+        d = self.max_image_latency_steps
+        n = self.n_obs_steps
 
         obs_dict = dict()
         for key in self.rgb_keys:
-            # move channel last to channel first
-            # T,H,W,C
-            # convert uint8 image to float32
-            obs_dict[key] = (np.moveaxis(data[key][T_slice], -1, 1)
+            cam_delay = d - np.random.randint(0, d + 1) if d > 0 else 0
+            obs_dict[key] = (np.moveaxis(data[key][cam_delay:cam_delay+n], -1, 1)
                              .astype(np.float32) / 255.)
-            # T,C,H,W
-            # save ram
             del data[key]
+
+        lowdim_slice = slice(d, d + n) if n is not None else slice(None)
         for key in self.lowdim_keys:
-            obs_dict[key] = data[key][T_slice].astype(np.float32)
+            obs_dict[key] = data[key][lowdim_slice].astype(np.float32)
             del data[key]
 
         aux_dict = dict()
         for key in self.auxiliary_keys:
-            aux_dict[key] = data[key][T_slice].astype(np.float32)
+            aux_dict[key] = data[key][lowdim_slice].astype(np.float32)
             del data[key]
 
         action = data['action'].astype(np.float32)
-        if self.n_latency_steps > 0:
-            action = action[self.n_latency_steps:]
+        total_action_offset = self.n_latency_steps + d
+        if total_action_offset > 0:
+            action = action[total_action_offset:]
 
         torch_data = {
             'obs': dict_apply(obs_dict, torch.from_numpy),
@@ -457,6 +456,7 @@ class StreamingMultiDataset(BaseImageDataset):
         pad_after=0,
         n_obs_steps=None,
         n_latency_steps=0,
+        max_image_latency_steps=0,
         seed=42,
         val_ratio=0.0,
         use_cache: bool = False,
@@ -479,6 +479,7 @@ class StreamingMultiDataset(BaseImageDataset):
             'pad_after': pad_after,
             'n_obs_steps': n_obs_steps,
             'n_latency_steps': n_latency_steps,
+            'max_image_latency_steps': max_image_latency_steps,
             'seed': seed,
             'val_ratio': val_ratio,
             'use_cache': use_cache,
@@ -695,6 +696,7 @@ class Sim2RealImageMultiDataset(BaseImageDataset):
         pad_after=0,
         n_obs_steps=None,
         n_latency_steps=0,
+        max_image_latency_steps=0,
         seed=42,
         val_ratio=0.0,
         use_cache: bool = True,
@@ -752,6 +754,7 @@ class Sim2RealImageMultiDataset(BaseImageDataset):
                 pad_after=pad_after,
                 n_obs_steps=n_obs_steps,
                 n_latency_steps=n_latency_steps,
+                max_image_latency_steps=max_image_latency_steps,
                 seed=seed,
                 val_ratio=val_ratio,
                 use_cache=use_cache,
@@ -780,6 +783,7 @@ class Sim2RealImageMultiDataset(BaseImageDataset):
             'pad_after': pad_after,
             'n_obs_steps': n_obs_steps,
             'n_latency_steps': n_latency_steps,
+            'max_image_latency_steps': max_image_latency_steps,
             'seed': seed,
             'val_ratio': val_ratio,
             'use_cache': use_cache,

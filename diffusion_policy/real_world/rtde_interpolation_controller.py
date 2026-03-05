@@ -16,13 +16,14 @@ from diffusion_policy.real_world.ur5e_kinematics import (
     forward_kinematics_calibrated, compute_jacobian_calibrated,
     get_ee_pose, axis_angle_to_quat, quat_to_axis_angle,
     apply_delta_pose, compute_pose_error,
+    PAYLOAD_MASS, PAYLOAD_COG,
 )
 
 
 class Command(enum.Enum):
     STOP = 0
     JointTorqueControl = 1   # Joint target -> FK -> OSC torque
-    CartesianOSCControl = 2  # Cartesian delta -> direct OSC torque (no IK)
+    CartesianOSCControl = 2  # Absolute EE target -> direct OSC torque
 
 
 class RTDEInterpolationController(mp.Process):
@@ -97,7 +98,8 @@ class RTDEInterpolationController(mp.Process):
         example = {
             'cmd': Command.JointTorqueControl.value,
             'target_joints': np.zeros((6,), dtype=np.float64),
-            'cartesian_delta': np.zeros((6,), dtype=np.float64),
+            'target_ee_pos': np.zeros((3,), dtype=np.float64),
+            'target_ee_quat': np.zeros((4,), dtype=np.float64),
             'close_gripper': np.zeros((1,), dtype=np.bool_),
         }
         input_queue = SharedMemoryQueue.create_from_examples(
@@ -119,6 +121,8 @@ class RTDEInterpolationController(mp.Process):
         for key in receive_keys:
             example[key] = np.array(getattr(rtde_r, 'get'+key)())
         example['robot_receive_timestamp'] = time.time()
+        example['osc_target_pos'] = np.zeros(3, dtype=np.float64)
+        example['osc_target_quat'] = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
         ring_buffer = SharedMemoryRingBuffer.create_from_examples(
             shm_manager=shm_manager,
             examples=example,
@@ -145,7 +149,8 @@ class RTDEInterpolationController(mp.Process):
         message = {
             'cmd': np.array([Command.STOP.value], dtype=np.int32),
             'target_joints': np.zeros((6,), dtype=np.float64),
-            'cartesian_delta': np.zeros((6,), dtype=np.float64),
+            'target_ee_pos': np.zeros((3,), dtype=np.float64),
+            'target_ee_quat': np.zeros((4,), dtype=np.float64),
             'close_gripper': np.zeros((1,), dtype=np.bool_),
         }
         self.input_queue.put(message)
@@ -188,30 +193,32 @@ class RTDEInterpolationController(mp.Process):
         message = {
             'cmd': np.array([Command.JointTorqueControl.value], dtype=np.int32),
             'target_joints': target_joints.astype(np.float64),
-            'cartesian_delta': np.zeros((6,), dtype=np.float64),
+            'target_ee_pos': np.zeros((3,), dtype=np.float64),
+            'target_ee_quat': np.zeros((4,), dtype=np.float64),
             'close_gripper': np.array([close_gripper], dtype=np.bool_),
         }
         self.input_queue.put(message)
 
-    def cartesian_osc_control(self, cartesian_delta, close_gripper):
+    def cartesian_osc_control(self, target_pos, target_quat, close_gripper):
         """
-        Send pre-scaled Cartesian delta for direct OSC tracking.
-        desired_EE = FK(current) + delta, then OSC tracks desired_EE.
-        No IK involved -- OSC operates directly in task space.
+        Send absolute EE target for direct OSC tracking.
         
         Args:
-            cartesian_delta: Array of 6 pre-scaled Cartesian deltas
-                [dx, dy, dz, drx, dry, drz] (meters / axis-angle radians)
+            target_pos: (3,) desired EE position [x, y, z] in base frame
+            target_quat: (4,) desired EE orientation as quaternion [w, x, y, z]
             close_gripper: Boolean for gripper state
         """
         assert self.is_alive()
-        cartesian_delta = np.array(cartesian_delta)
-        assert cartesian_delta.shape == (6,)
+        target_pos = np.array(target_pos, dtype=np.float64)
+        target_quat = np.array(target_quat, dtype=np.float64)
+        assert target_pos.shape == (3,)
+        assert target_quat.shape == (4,)
 
         message = {
             'cmd': np.array([Command.CartesianOSCControl.value], dtype=np.int32),
             'target_joints': np.zeros((6,), dtype=np.float64),
-            'cartesian_delta': cartesian_delta.astype(np.float64),
+            'target_ee_pos': target_pos,
+            'target_ee_quat': target_quat,
             'close_gripper': np.array([close_gripper], dtype=np.bool_),
         }
         self.input_queue.put(message)
@@ -301,6 +308,7 @@ class RTDEInterpolationController(mp.Process):
         rtde_c = RTDEControlInterface(hostname=robot_ip, frequency=self.frequency,
                                       flags=RTDEControlInterface.FLAG_VERBOSE | RTDEControlInterface.FLAG_UPLOAD_SCRIPT)
         rtde_r = RTDEReceiveInterface(hostname=robot_ip, frequency=self.frequency)
+        rtde_c.setPayload(PAYLOAD_MASS, PAYLOAD_COG)
 
         try:
             if self.verbose:
@@ -317,9 +325,10 @@ class RTDEInterpolationController(mp.Process):
             # main loop
             curr_joints = rtde_r.getActualQ()
             current_target_joints = np.array(curr_joints, dtype=np.float64)
-            # Cartesian target (set when CartesianOSCControl is used)
-            current_target_ee_pos = None
-            current_target_ee_quat = None
+            # Cartesian target: initialize from current FK
+            init_pos, init_quat = get_ee_pose(np.array(curr_joints))
+            current_target_ee_pos = init_pos
+            current_target_ee_quat = init_quat
             use_cartesian_target = False
             current_gripper_close = False
             current_gripper_state = 'open'
@@ -363,6 +372,8 @@ class RTDEInterpolationController(mp.Process):
                 for key in self.receive_keys:
                     state[key] = np.array(getattr(rtde_r, 'get'+key)())
                 state['robot_receive_timestamp'] = time.time()
+                state['osc_target_pos'] = current_target_ee_pos.copy()
+                state['osc_target_quat'] = current_target_ee_quat.copy()
                 
                 self.ring_buffer.put(state)
 
@@ -389,21 +400,20 @@ class RTDEInterpolationController(mp.Process):
                         elif cmd == Command.JointTorqueControl.value:
                             # Joint target -> FK -> OSC
                             current_target_joints = np.array(command['target_joints'], dtype=np.float64)
+                            current_target_ee_pos, current_target_ee_quat = get_ee_pose(current_target_joints)
                             use_cartesian_target = False
                             current_gripper_close = command['close_gripper'][0] if isinstance(command['close_gripper'], np.ndarray) else command['close_gripper']
                             if self.verbose:
                                 print("[RTDEOSCController] New joint target: "
                                       f"{current_target_joints}")
                         elif cmd == Command.CartesianOSCControl.value:
-                            # Cartesian delta -> desired EE -> direct OSC
-                            delta = np.array(command['cartesian_delta'], dtype=np.float64)
-                            ee_pos, ee_quat = get_ee_pose(curr_joints)
-                            current_target_ee_pos, current_target_ee_quat = apply_delta_pose(
-                                ee_pos, ee_quat, delta)
+                            # Absolute EE target -> direct OSC
+                            current_target_ee_pos = np.array(command['target_ee_pos'], dtype=np.float64)
+                            current_target_ee_quat = np.array(command['target_ee_quat'], dtype=np.float64)
                             use_cartesian_target = True
                             current_gripper_close = command['close_gripper'][0] if isinstance(command['close_gripper'], np.ndarray) else command['close_gripper']
                             if self.verbose:
-                                print(f"[RTDEOSCController] Cartesian OSC: delta_pos={delta[:3]}, "
+                                print(f"[RTDEOSCController] Cartesian OSC: "
                                       f"target_pos={current_target_ee_pos}")
                         else:
                             keep_running = False

@@ -50,7 +50,7 @@ import imageio
 from scipy.spatial.transform import Rotation as R
 
 # Calibrated FK matching simulation (wrist_3_link in REP-103 base_link frame)
-from diffusion_policy.real_world.ur5e_kinematics import get_ee_pose, quat_to_axis_angle
+from diffusion_policy.real_world.ur5e_kinematics import get_ee_pose, quat_to_axis_angle, apply_delta_pose
 
 # Robomimic imports
 import robomimic.utils.torch_utils as TorchUtils
@@ -124,14 +124,39 @@ def compute_calibrated_ee_pose(joint_positions):
 @click.option('--contact_threshold', default=5.0, type=float,
               help='Force norm (N) threshold for binary_contact obs. '
                    'Sim uses 25.0 on joint wrench; real F/T sensor differs.')
+@click.option('--collect_sysid', default=None, type=str,
+              help='Save on-policy sysid data to .pt file (joint traj + OSC targets)')
 def main(input, output, robot_ip, match_dataset, match_episode,
          vis_camera_idx, init_joints, 
          steps_per_inference, max_duration,
-         frequency, save_video, action_noise, contact_threshold):
+         frequency, save_video, action_noise, contact_threshold,
+         collect_sysid):
     # Per-axis Cartesian scale matching simulation DiffIK config
     CARTESIAN_SCALE = np.array([0.01, 0.01, 0.002, 0.02, 0.02, 0.2])
     print(f"Cartesian OSC scale: {CARTESIAN_SCALE}")
-    
+
+    # Sysid data collection state
+    sysid_records = []  # list of (joint_pos, target_pos, target_quat)
+
+    def save_sysid_data():
+        """Save 10Hz policy waypoints for 500Hz replay via test_real_ur5e_osc_cube.py --replay_eval."""
+        if not collect_sysid or len(sysid_records) == 0:
+            return
+        import torch as _torch
+        jp = np.array([r[0] for r in sysid_records])
+        wp_pos = np.array([r[1] for r in sysid_records])
+        wp_quat = np.array([r[2] for r in sysid_records])
+        n = len(sysid_records)
+        _torch.save({
+            "joint_positions": _torch.tensor(jp, dtype=_torch.float32),
+            "initial_joint_pos": _torch.tensor(jp[0], dtype=_torch.float32),
+            "waypoint_step_indices": _torch.arange(n, dtype=_torch.long),
+            "waypoint_target_pos": _torch.tensor(wp_pos, dtype=_torch.float32),
+            "waypoint_target_quat": _torch.tensor(wp_quat, dtype=_torch.float32),
+            "dt": dt,
+        }, collect_sysid)
+        print(f"\nSaved sysid data ({n} policy steps at {frequency}Hz) to: {collect_sysid}")
+
     # load match_dataset
     match_camera_idx = 0
     episode_first_frame_map = dict()
@@ -333,9 +358,17 @@ def main(input, output, robot_ip, match_dataset, match_episode,
 
                         raw_actions = np.concatenate([raw_arm_action, gripper_actions], axis=1)  # for last_arm_action obs
 
-                        # Cartesian OSC: per-axis scale and send directly to OSC
+                        # Cartesian OSC: scale delta, compute absolute target from observed pose
                         scaled_delta = raw_arm_action * CARTESIAN_SCALE
-                        target_actions = np.concatenate([scaled_delta, gripper_actions], axis=1)
+                        obs_jp = obs['arm_joint_pos'][-1]
+                        obs_pos, obs_quat = get_ee_pose(obs_jp)
+                        tgt_pos, tgt_quat = apply_delta_pose(obs_pos, obs_quat, scaled_delta[0])
+                        tgt_aa = quat_to_axis_angle(tgt_quat)
+                        abs_target = np.concatenate([tgt_pos, tgt_aa])[None]  # (1, 6)
+                        target_actions = np.concatenate([abs_target, gripper_actions], axis=1)
+
+                        if collect_sysid:
+                            sysid_records.append((obs_jp.copy(), tgt_pos.copy(), tgt_quat.copy()))
 
                         # deal with timing
                         action_timestamps = (np.arange(len(action), dtype=np.float64)
@@ -391,11 +424,14 @@ def main(input, output, robot_ip, match_dataset, match_episode,
                         elif key_stroke == ord('s'):
                             # Stop episode
                             # Hand control back to human
+                            save_sysid_data()
                             env.end_episode()
                             print('Stopped.')
                             break
                         elif key_stroke == ord('r'):
                             # Reset robot and start new trajectory
+                            save_sysid_data()
+                            sysid_records.clear()
                             print('Resetting robot for new trajectory...')
                             env.end_episode()
                             
@@ -452,6 +488,7 @@ def main(input, output, robot_ip, match_dataset, match_episode,
                         #     term_area_start_timestamp = float('inf')
 
                         if terminate:
+                            save_sysid_data()
                             env.end_episode()
                             if save_video and episode_video_writer is not None:
                                 episode_video_writer.close()
@@ -466,6 +503,7 @@ def main(input, output, robot_ip, match_dataset, match_episode,
                 except Exception as e:
                     print(e)
                     print("Interrupted!")
+                    save_sysid_data()
                     env.end_episode()
                     if save_video and episode_video_writer is not None:
                         episode_video_writer.close()

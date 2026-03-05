@@ -18,6 +18,7 @@ from diffusion_policy.real_world.multi_camera_visualizer import MultiCameraVisua
 from diffusion_policy.common.replay_buffer import ReplayBuffer
 from diffusion_policy.common.cv2_util import (
     get_image_transform, optimal_row_cols)
+from diffusion_policy.real_world.ur5e_kinematics import axis_angle_to_quat
 
 DEFAULT_OBS_KEY_MAP = {
     # robot
@@ -375,8 +376,8 @@ class RealEnv:
         Args:
             actions: Unified robot actions (shape: N x 7) to execute:
                 - action_mode='joint':  actions[:, :6] = target joint positions (rad)
-                - action_mode='cartesian': actions[:, :6] = pre-scaled Cartesian delta
-                    [dx, dy, dz, drx, dry, drz] (meters / axis-angle rad)
+                - action_mode='cartesian': actions[:, :6] = absolute EE target
+                    [px, py, pz, ax, ay, az] (position + axis-angle orientation)
                 - actions[:, 6] = Gripper position (<0=closed, >=0=open)
             timestamps: Action timestamps
             stages: Optional stage information
@@ -414,8 +415,11 @@ class RealEnv:
         # Execute actions via OSC
         for i in range(len(new_arm_actions)):
             if self.action_mode == 'cartesian':
+                target_pos = new_arm_actions[i, :3]
+                target_quat = axis_angle_to_quat(new_arm_actions[i, 3:6])
                 self.robot.cartesian_osc_control(
-                    cartesian_delta=new_arm_actions[i],
+                    target_pos=target_pos,
+                    target_quat=target_quat,
                     close_gripper=new_gripper_actions[i]
                 )
             else:
