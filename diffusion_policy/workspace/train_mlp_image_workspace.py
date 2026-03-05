@@ -224,6 +224,7 @@ class TrainMLPImageWorkspace(BaseWorkspace):
                                 os.makedirs(os.path.dirname(step_ckpt_path), exist_ok=True)
                                 self.save_checkpoint(path=step_ckpt_path)
                                 self.model = model_ddp
+                                self.model.train()
 
                                 # Update last checkpoint step
                                 self.last_checkpoint_step = self.global_step
@@ -282,6 +283,8 @@ class TrainMLPImageWorkspace(BaseWorkspace):
                         del result
                         del pred_action
                         del mse
+
+                policy.train()
 
                 if self.accelerator.is_main_process:
                     wandb_run.log(step_log, step=self.global_step)
