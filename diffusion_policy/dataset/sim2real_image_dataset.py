@@ -64,8 +64,10 @@ class Sim2RealImageDataset(BaseImageDataset):
         val_ratio=0.0,
         use_cache: bool = False,
         use_disk: bool = True,
+        action_norm_mode: str = "limits",
     ):
         super().__init__()
+        self.action_norm_mode = action_norm_mode
         assert os.path.isdir(dataset_path)
         #debug printing stuff
         print("shape_meta: ", shape_meta)
@@ -125,10 +127,15 @@ class Sim2RealImageDataset(BaseImageDataset):
             self.auxiliary_keys = [
                 k for k, v in shape_meta['auxiliary_obs'].items()]
 
+        # Detect expert distribution keys (saved during data collection)
+        self.expert_dist_keys = [
+            k for k in self.replay_buffer.root['data'].keys()
+            if k.startswith('expert_action_')]
+
         # Create key_first_k for performance optimization
         key_first_k = dict()
         if n_obs_steps is not None:
-            for key in self.rgb_keys + self.lowdim_keys + self.auxiliary_keys:
+            for key in self.rgb_keys + self.lowdim_keys + self.auxiliary_keys + self.expert_dist_keys:
                 key_first_k[key] = n_obs_steps + max_image_latency_steps
 
         # Split train/val
@@ -272,7 +279,7 @@ class Sim2RealImageDataset(BaseImageDataset):
         normalizer = LinearNormalizer()
         # action
         normalizer['action'] = SingleFieldLinearNormalizer.create_fit(
-            self.replay_buffer['action'], mode="limits")
+            self.replay_buffer['action'], mode=self.action_norm_mode)
         # obs
         for key in self.lowdim_keys:
             normalizer[key] = SingleFieldLinearNormalizer.create_fit(
@@ -315,6 +322,11 @@ class Sim2RealImageDataset(BaseImageDataset):
             aux_dict[key] = data[key][lowdim_slice].astype(np.float32)
             del data[key]
 
+        expert_dist = dict()
+        for key in self.expert_dist_keys:
+            expert_dist[key] = data[key][lowdim_slice].astype(np.float32)
+            del data[key]
+
         action = data['action'].astype(np.float32)
         total_action_offset = self.n_latency_steps + d
         if total_action_offset > 0:
@@ -326,6 +338,8 @@ class Sim2RealImageDataset(BaseImageDataset):
         }
         if aux_dict:
             torch_data['auxiliary_obs'] = dict_apply(aux_dict, torch.from_numpy)
+        if expert_dist:
+            torch_data['expert_dist'] = dict_apply(expert_dist, torch.from_numpy)
         return torch_data
 
 
@@ -462,6 +476,7 @@ class StreamingMultiDataset(BaseImageDataset):
         use_cache: bool = False,
         use_disk: bool = False,
         samples_per_file_multiplier: float = 1.0,
+        action_norm_mode: str = "limits",
     ):
         super().__init__()
 
@@ -483,7 +498,8 @@ class StreamingMultiDataset(BaseImageDataset):
             'seed': seed,
             'val_ratio': val_ratio,
             'use_cache': use_cache,
-            'use_disk': use_disk
+            'use_disk': use_disk,
+            'action_norm_mode': action_norm_mode,
         }
 
         # Calculate total epoch length and normalizer from all files in one pass
@@ -703,6 +719,7 @@ class Sim2RealImageMultiDataset(BaseImageDataset):
         use_disk: bool = True,
         use_streaming: bool = False,
         samples_per_file_multiplier: float = 1.0,
+        action_norm_mode: str = "limits",
     ):
         super().__init__()
 
@@ -760,6 +777,7 @@ class Sim2RealImageMultiDataset(BaseImageDataset):
                 use_cache=use_cache,
                 use_disk=use_disk,
                 samples_per_file_multiplier=samples_per_file_multiplier,
+                action_norm_mode=action_norm_mode,
             )
             self.is_streaming = True
             return
@@ -787,7 +805,8 @@ class Sim2RealImageMultiDataset(BaseImageDataset):
             'seed': seed,
             'val_ratio': val_ratio,
             'use_cache': use_cache,
-            'use_disk': use_disk
+            'use_disk': use_disk,
+            'action_norm_mode': action_norm_mode,
         }
 
         for config in self.dataset_config:

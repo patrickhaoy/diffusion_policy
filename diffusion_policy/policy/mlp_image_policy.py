@@ -18,8 +18,9 @@ class MLPImagePolicy(BaseImagePolicy):
             hidden_dim: int = 512,
             hidden_depth: int = 4,
             aux_loss_weight: float = 0.0,
+            loss_type: str = "nll",
             **kwargs):
-        assert n_action_steps == 1, "MLPImagePolicy only supports n_action_steps=1"
+        assert loss_type in ("nll", "kl"), f"loss_type must be 'nll' or 'kl', got '{loss_type}'"
         
         super().__init__()
         action_shape = shape_meta['action']['shape']
@@ -33,6 +34,7 @@ class MLPImagePolicy(BaseImagePolicy):
         self.obs_feature_dim = obs_feature_dim
         self.normalizer = LinearNormalizer()
         self.aux_loss_weight = aux_loss_weight
+        self.loss_type = loss_type
         self.kwargs = kwargs
         
         # Input: all obs steps concatenated
@@ -46,9 +48,9 @@ class MLPImagePolicy(BaseImagePolicy):
             last_dim = hidden_dim
         self.trunk = nn.Sequential(*layers)
         
-        # Separate heads for mean and log std
-        self.mean_head = nn.Linear(last_dim, action_dim)
-        self.log_std_head = nn.Linear(last_dim, action_dim)
+        # Separate heads for mean and log std (flat output for all action steps)
+        self.mean_head = nn.Linear(last_dim, action_dim * n_action_steps)
+        self.log_std_head = nn.Linear(last_dim, action_dim * n_action_steps)
         
         self.log_std_limits = (-5.0, 2.0)
 
@@ -93,10 +95,11 @@ class MLPImagePolicy(BaseImagePolicy):
         nobs_features = nobs_features.reshape(B, To, -1)
         mlp_input = nobs_features.reshape(B, -1)
         
-        # Get action distribution
+        # Get action distribution (predicts all n_action_steps)
         dist = self.forward(mlp_input)
-        # action_pred = dist.rsample()
-        action_pred = dist.mean  # Use mean instead of sampling for more stable predictions
+        action_pred_all = dist.mean.reshape(B, self.n_action_steps, self.action_dim)
+        # Receding horizon: return only the first predicted action
+        action_pred = action_pred_all[:, 0]
         action = self.normalizer['action'].unnormalize(action_pred)
         return {
             'action': action,
@@ -126,10 +129,25 @@ class MLPImagePolicy(BaseImagePolicy):
         h = self.get_trunk_features(mlp_input)
 
         # BC loss
-        assert Ta == 1, "MLPImagePolicy only supports n_action_steps=1"
-        target = nactions[:, To-1:To+Ta-1].squeeze()
-        dist = self.get_action_dist(h)
-        bc_loss = -dist.log_prob(target).sum(dim=-1).mean()
+        student_dist = self.get_action_dist(h)
+
+        if self.loss_type == "kl":
+            assert Ta == 1, "KL loss only supports n_action_steps=1"
+            assert 'expert_dist' in batch, \
+                "loss_type='kl' requires expert distribution data in dataset"
+            raw_mean = batch['expert_dist']['expert_action_mean'][:, To-1]
+            raw_std = batch['expert_dist']['expert_action_std'][:, To-1]
+
+            norm_expert_mean = self.normalizer['action'].normalize(raw_mean)
+            action_scale = self.normalizer['action'].params_dict['scale']
+            norm_expert_std = raw_std * action_scale
+
+            expert_dist = Normal(norm_expert_mean, norm_expert_std)
+            bc_loss = torch.distributions.kl_divergence(
+                expert_dist, student_dist).sum(dim=-1).mean()
+        else:
+            target = nactions[:, To-1:To+Ta-1].reshape(B, -1)
+            bc_loss = -student_dist.log_prob(target).sum(dim=-1).mean()
 
         # Auxiliary reconstruction loss (from encoder features, not trunk)
         aux_loss = torch.tensor(0.0, device=h.device)
