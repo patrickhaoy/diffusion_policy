@@ -20,6 +20,7 @@ class MLPImagePolicy(BaseImagePolicy):
             aux_loss_weight: float = 0.0,
             loss_type: str = "nll",
             **kwargs):
+        assert n_action_steps == 1, "MLPImagePolicy only supports n_action_steps=1"
         assert loss_type in ("nll", "kl"), f"loss_type must be 'nll' or 'kl', got '{loss_type}'"
         
         super().__init__()
@@ -48,9 +49,9 @@ class MLPImagePolicy(BaseImagePolicy):
             last_dim = hidden_dim
         self.trunk = nn.Sequential(*layers)
         
-        # Separate heads for mean and log std (flat output for all action steps)
-        self.mean_head = nn.Linear(last_dim, action_dim * n_action_steps)
-        self.log_std_head = nn.Linear(last_dim, action_dim * n_action_steps)
+        # Separate heads for mean and log std
+        self.mean_head = nn.Linear(last_dim, action_dim)
+        self.log_std_head = nn.Linear(last_dim, action_dim)
         
         self.log_std_limits = (-5.0, 2.0)
 
@@ -94,12 +95,11 @@ class MLPImagePolicy(BaseImagePolicy):
         nobs_features = self.obs_encoder(this_nobs)
         nobs_features = nobs_features.reshape(B, To, -1)
         mlp_input = nobs_features.reshape(B, -1)
-        
-        # Get action distribution (predicts all n_action_steps)
+
+        # Get action distribution
         dist = self.forward(mlp_input)
-        action_pred_all = dist.mean.reshape(B, self.n_action_steps, self.action_dim)
-        # Receding horizon: return only the first predicted action
-        action_pred = action_pred_all[:, 0]
+        # action_pred = dist.mean
+        action_pred = dist.rsample()
         action = self.normalizer['action'].unnormalize(action_pred)
         return {
             'action': action,
@@ -129,10 +129,10 @@ class MLPImagePolicy(BaseImagePolicy):
         h = self.get_trunk_features(mlp_input)
 
         # BC loss
+        assert Ta == 1, "MLPImagePolicy only supports n_action_steps=1"
         student_dist = self.get_action_dist(h)
 
         if self.loss_type == "kl":
-            assert Ta == 1, "KL loss only supports n_action_steps=1"
             assert 'expert_dist' in batch, \
                 "loss_type='kl' requires expert distribution data in dataset"
             raw_mean = batch['expert_dist']['expert_action_mean'][:, To-1]
@@ -146,7 +146,7 @@ class MLPImagePolicy(BaseImagePolicy):
             bc_loss = torch.distributions.kl_divergence(
                 expert_dist, student_dist).sum(dim=-1).mean()
         else:
-            target = nactions[:, To-1:To+Ta-1].reshape(B, -1)
+            target = nactions[:, To-1:To+Ta-1].squeeze()
             bc_loss = -student_dist.log_prob(target).sum(dim=-1).mean()
 
         # Auxiliary reconstruction loss (from encoder features, not trunk)
