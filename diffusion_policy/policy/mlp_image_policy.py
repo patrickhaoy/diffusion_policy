@@ -98,8 +98,8 @@ class MLPImagePolicy(BaseImagePolicy):
 
         # Get action distribution
         dist = self.forward(mlp_input)
-        # action_pred = dist.mean
-        action_pred = dist.rsample()
+        action_pred = dist.mean
+        # action_pred = dist.rsample()
         action = self.normalizer['action'].unnormalize(action_pred)
         return {
             'action': action,
