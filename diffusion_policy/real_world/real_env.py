@@ -173,12 +173,7 @@ class RealEnv:
                 print(f"Using custom initial joint positions: {j_init}")
             else:
                 # Use default initial joint positions
-                # j_init = np.array([0,-90,90,-90,-90,0]) / 180 * np.pi
-                # j_init = np.array([13.43, -66.08, 99.0, -123.53, -95.6, -0.21]) / 180 * np.pi
                 j_init = np.array([16.85, -79.74, 99.80, -114.68, -91.09, 20.43]) / 180 * np.pi
-                # j_init = np.array([12.95, -63.51, 91.74, -119.57, -72.81, -44.61]) / 180 * np.pi
-                # j_init = np.array([-0.5748, -1.2212, 1.6753, -2.0596, -1.1225, -1.0952])
-                # j_init = np.array([10.32, -66.41, 107.13, -141.71, -80.48, -15.71]) / 180 * np.pi
                 print(f"Using default initial joint positions: {j_init}")
 
         robot = RTDEInterpolationController(

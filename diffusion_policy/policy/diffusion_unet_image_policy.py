@@ -37,6 +37,7 @@ class DiffusionUnetImagePolicy(BaseImagePolicy):
         action_dim = action_shape[0]
         # get feature dim
         obs_feature_dim = obs_encoder.output_shape()[0]
+
         # create diffusion model
         input_dim = action_dim + obs_feature_dim
         global_cond_dim = None
@@ -255,5 +256,4 @@ class DiffusionUnetImagePolicy(BaseImagePolicy):
         loss = loss * loss_mask.type(loss.dtype)
         loss = reduce(loss, 'b ... -> b (...)', 'mean')
         loss = loss.mean()
-
         return loss
