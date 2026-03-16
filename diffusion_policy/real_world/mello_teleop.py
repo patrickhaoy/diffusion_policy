@@ -1,18 +1,19 @@
-"""Module to control robot using Mello device through serial communication."""
+"""
+Mello device teleop over serial: stream 6 joint angles + gripper from Mello to the robot.
+See README_ur5e.md in the repo root for setup and usage.
+"""
 
-import serial
-import threading
 import ast
 import math
+import serial
+import threading
 import time
 
+
 class DummyMelloTeleopInterface:
-    """A dummy version of MelloTeleopInterface that returns fixed joint positions for testing."""
+    """Returns fixed joint positions for testing (no Mello device)."""
     def __init__(self, port=None, baudrate=None):
-        """
-        Initialize with fixed joint positions.
-        port and baudrate are ignored, they're just here for API compatibility.
-        """
+        """port and baudrate ignored; for API compatibility only."""
         # Initialize with a reasonable "home" position in radians
         self.fixed_joints = [0, -math.pi/2, math.pi/2, -math.pi/2, -math.pi/2, 0]
         # Concatenate joints with gripper value (1 for open, -1 for closed)
@@ -37,6 +38,7 @@ class DummyMelloTeleopInterface:
         self.cleanup()
 
 class MelloTeleopInterface:
+    """Reads joint positions and gripper from Mello over serial; use as context manager."""
     def __init__(self, port='/dev/serial/by-id/usb-M5Stack_Technology_Co.__Ltd_M5Stack_UiFlow_2.0_24587ce945900000-if00', baudrate=115200):
         self.port = port
         self.baudrate = baudrate

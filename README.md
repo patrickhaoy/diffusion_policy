@@ -6,6 +6,7 @@
 [[Colab (state)]](https://colab.research.google.com/drive/1gxdkgRVfM55zihY9TFLja97cSVZOZq2B?usp=sharing)
 [[Colab (vision)]](https://colab.research.google.com/drive/18GIHeOQ5DyjMN8iIRZL2EKZ0745NLIpg?usp=sharing)
 
+**This fork is used with [OmniReset](https://uw-lab.github.io/UWLab/main/source/publications/omnireset/index.html#quick-start)** (UW Lab): train RL policies in Isaac Sim with OmniReset, then distill to vision-based diffusion policies in this repo for real-robot deployment.
 
 [Cheng Chi](http://cheng-chi.github.io/)<sup>1</sup>,
 [Siyuan Feng](https://www.cs.cmu.edu/~sfeng/)<sup>2</sup>,

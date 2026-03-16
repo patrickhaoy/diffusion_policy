@@ -1,21 +1,11 @@
 """
-Usage:
-(robodiff)$ python demo_real_robot.py -o <demo_save_dir> --robot_ip <ip_of_ur5>
+Mello teleop for UR5e: move the arm with the Mello device and optionally record demos.
 
-Robot movement:
-Control robot joint positions using Mello device.
-Gripper control is handled through Mello's 7th axis.
+  python demo_real_robot.py -o <output_dir> --robot_ip <ur5e_ip>
 
-Debug mode (--debug flag):
-When debug flag is set, uses fixed joint positions instead of Mello device.
-The robot will move to a "home" position and stay there.
-
-Recording control:
-Click the opencv window (make sure it's in focus).
-Press "C" to start recording.
-Press "S" to stop recording.
-Press "Q" to exit program.
-Press "Backspace" to delete the previously recorded episode.
+See README_ur5e.md for UR5e and Mello setup. If the robot stalls,
+tune gains with --osc_kp_pos and --osc_kp_rot. Keys: C=start record, S=stop, Q=quit,
+Backspace=drop last episode. Use --debug for fixed joint positions (no Mello).
 """
 
 # %%
