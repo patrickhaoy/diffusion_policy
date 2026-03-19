@@ -283,6 +283,11 @@ def main(input, output, robot_ip, match_dataset, match_episode,
             actions = []
             gripper_open_steps_remaining = 0
             GRIPPER_OPEN_DURATION = 5  # timesteps to hold gripper open when 'g' pressed
+            # Stuck detection: if robot doesn't move for this long, open gripper to get unstuck
+            STUCK_WINDOW_S = 2.0
+            STUCK_JOINT_THRESHOLD_RAD = 0.002  # ~0.1 deg max movement per joint over window
+            STUCK_GRIPPER_OPEN_STEPS = int(frequency)  # 1 s open at control freq
+            stuck_buffer = []  # list of (t, joint_pos)
             
             while True:
                 # ========== policy control loop ==============
@@ -295,6 +300,7 @@ def main(input, output, robot_ip, match_dataset, match_episode,
                     env.start_episode(eval_t_start)
                     precise_wait(eval_t_start, time_func=time.time)
                     print("Started!")
+                    stuck_buffer.clear()
                     if save_video:
                         episode_id_start = getattr(env.replay_buffer, 'n_episodes', 0)
                         ep_video_path = pathlib.Path(output) / f'policy_cameras_ep_{episode_id_start:03d}.mp4'
@@ -348,6 +354,21 @@ def main(input, output, robot_ip, match_dataset, match_episode,
                         if action_noise > 0:
                             raw_arm_action = raw_arm_action + np.random.randn(*raw_arm_action.shape) * action_noise
                         gripper_actions = action[:, 6:7]
+
+                        # Stuck detection: if robot barely moved for STUCK_WINDOW_S, open gripper to get unstuck
+                        if gripper_open_steps_remaining == 0:
+                            t_now = time.monotonic()
+                            stuck_buffer.append((t_now, obs['arm_joint_pos'][-1].copy()))
+                            # keep only last STUCK_WINDOW_S
+                            while stuck_buffer and (t_now - stuck_buffer[0][0]) > STUCK_WINDOW_S:
+                                stuck_buffer.pop(0)
+                            if len(stuck_buffer) >= STUCK_WINDOW_S * frequency:
+                                jps = np.array([b[1] for b in stuck_buffer])
+                                range_per_joint = jps.max(axis=0) - jps.min(axis=0)
+                                if np.max(range_per_joint) < STUCK_JOINT_THRESHOLD_RAD:
+                                    gripper_open_steps_remaining = STUCK_GRIPPER_OPEN_STEPS
+                                    stuck_buffer.clear()
+                                    print("[Stuck detection] No movement for 2s, opening gripper")
 
                         # Gripper open macro: override policy gripper command
                         if gripper_open_steps_remaining > 0:
@@ -432,6 +453,7 @@ def main(input, output, robot_ip, match_dataset, match_episode,
                             # Reset robot and start new trajectory
                             save_sysid_data()
                             sysid_records.clear()
+                            stuck_buffer.clear()
                             print('Resetting robot for new trajectory...')
                             env.end_episode()
                             
