@@ -3,13 +3,13 @@
 Runs a frequency-sweep (chirp) trajectory through the calibrated OSC controller
 (same controller used in simulation), recording joint positions and OSC target
 poses at 500 Hz.  The output .pt file is consumed directly by
-OctiLab/scripts/sysid/sysid_ur5e_osc.py for CMA-ES optimization.
+UWLab/scripts/sysid/sysid_ur5e_osc.py for CMA-ES optimization.
 
-Usage:
-    python collect_sysid_data.py --robot_ip 192.168.1.10 \
+Usage (from diffusion_policy repo root):
+    python scripts/sim2real/collect_sysid_data.py --robot_ip 192.168.1.10 \
         --output data/sysid_data_real.pt
 
-    python collect_sysid_data.py --robot_ip 192.168.1.10 \
+    python scripts/sim2real/collect_sysid_data.py --robot_ip 192.168.1.10 \
         --output data/sysid_data_real.pt \
         --duration 12 --f0 0.1 --f1 3.0 --pos_amp 0.10 --rot_amp 0.25
 """

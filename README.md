@@ -261,6 +261,25 @@ python eval_real_robot.py -i data/outputs/blah/checkpoints/latest.ckpt -o data/e
 ```
 Press "C" to start evaluation (handing control over to the policy). Press "S" to stop the current episode.
 
+## 🤖 UR5e + OmniReset (Sim2Real)
+
+This fork adds real-robot support for the [OmniReset](https://uw-lab.github.io/UWLab/main/source/publications/omnireset/index.html) pipeline (UW Lab). The full workflow — system identification, RL finetuning, camera calibration, distillation, and deployment — is documented in the [UW Lab Sim2Real docs](https://uw-lab.github.io/UWLab/main/source/publications/omnireset/sim2real.html).
+
+### Quick start
+
+```bash
+# Teleop / record demos
+python demo_real_robot.py -o data/demos --robot_ip 192.168.1.10
+# Train
+python train.py --config-name train_mlp_sim2real_image_with_aux_loss_workspace.yaml --config-dir diffusion_policy/config task.dataset.dataset_dir=data/dataset.zarr
+# Deploy
+python eval_real_robot.py -i data/outputs/.../latest.ckpt -o data/eval --robot_ip 192.168.1.10 -j
+```
+
+See `README_ur5e.md` for UR5e hardware setup. For the complete sim2real pipeline (camera calibration, sysid, finetuning, deployment), see the [UW Lab Sim2Real docs](https://uw-lab.github.io/UWLab/main/source/publications/omnireset/sim2real.html).
+
+---
+
 ## 🗺️ Codebase Tutorial
 This codebase is structured under the requirement that:
 1. implementing `N` tasks and `M` methods will only require `O(N+M)` amount of code instead of `O(N*M)`

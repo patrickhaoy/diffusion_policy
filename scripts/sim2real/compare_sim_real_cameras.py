@@ -3,9 +3,9 @@
 Compare sim dataset images with real robot camera images.
 Overlays them side-by-side and with alpha blending to check alignment.
 
-Usage:
-    python compare_sim_real_cameras.py \
-        --dataset /home/patrickhaoy/research/OctiLab/datasets/test/rgb0.zarr \
+Usage (from diffusion_policy repo root):
+    python scripts/sim2real/compare_sim_real_cameras.py \
+        --dataset /path/to/UWLab/datasets/test/rgb0.zarr \
         --robot_ip 192.168.1.10 \
         --output comparison_output
 """

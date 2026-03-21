@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """Capture a reference RGB image from a RealSense camera for sim2real alignment.
 
-Usage:
+Usage (from diffusion_policy repo root):
     # Capture from all cameras:
-    python capture_real_image.py
+    python scripts/sim2real/capture_real_image.py
 
     # Capture from a specific camera:
-    python capture_real_image.py --camera front
-    python capture_real_image.py --camera side
-    python capture_real_image.py --camera wrist
+    python scripts/sim2real/capture_real_image.py --camera front
+    python scripts/sim2real/capture_real_image.py --camera side
+    python scripts/sim2real/capture_real_image.py --camera wrist
 
     # Custom output directory:
-    python capture_real_image.py --output /path/to/output/
+    python scripts/sim2real/capture_real_image.py --output /path/to/output/
 
 The images are saved as real_front.png, real_side.png, real_wrist.png.
 """
@@ -26,7 +26,7 @@ import numpy as np
 from multiprocessing.managers import SharedMemoryManager
 
 # Ensure project root is on path
-ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT_DIR)
 
 from diffusion_policy.real_world.single_realsense import SingleRealsense
@@ -105,12 +105,12 @@ def main(camera, output, settle_time, preview):
                 cv2.destroyAllWindows()
 
     print(f"\nDone! Images saved to {os.path.abspath(output)}/")
-    print("Use with align_cameras.py:")
+    print("Use with 3_align_rgb.py (from diffusion_policy repo root):")
     for cam_name in cameras_to_capture:
         sim_cam = f"{cam_name}_camera"
         img_path = os.path.join(os.path.abspath(output), f"real_{cam_name}.png")
-        print(f"  python scripts/sim2real/align_cameras.py --enable_cameras "
-              f"--camera {sim_cam} --real_image {img_path}")
+        print(f"  python scripts/sim2real/3_align_rgb.py --enable_cameras "
+              f"--camera_key {sim_cam} --real_image_path {img_path}")
 
 
 if __name__ == "__main__":

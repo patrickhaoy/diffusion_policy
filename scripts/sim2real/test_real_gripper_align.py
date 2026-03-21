@@ -2,7 +2,7 @@
 Test script for Robotiq 2F-85 gripper sim2real alignment.
 Moves gripper through open/close cycles and logs position trajectory.
 
-Companion to OctiLab/scripts/test_sim_gripper_align.py for comparing dynamics.
+Companion to UWLab/scripts/test_sim_gripper_align.py for comparing dynamics.
 Both scripts output JSON with the same schema so trajectories can be overlaid.
 
 Position mapping:
@@ -10,9 +10,9 @@ Position mapping:
   Sim:  0.0 (open) to 0.785398 rad (closed) finger_joint angle
   Normalized: 0.0 (open) to 1.0 (closed)
 
-Usage:
-    python test_real_gripper_align.py --robot_ip 192.168.1.10 -o gripper_real.json
-    python test_real_gripper_align.py --robot_ip 192.168.1.10 --speed 64 --num_cycles 5 -o gripper_real_slow.json
+Usage (from diffusion_policy repo root):
+    python scripts/sim2real/test_real_gripper_align.py --robot_ip 192.168.1.10 -o gripper_real.json
+    python scripts/sim2real/test_real_gripper_align.py --robot_ip 192.168.1.10 --speed 64 --num_cycles 5 -o gripper_real_slow.json
 """
 
 import numpy as np

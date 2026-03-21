@@ -1,13 +1,13 @@
 """Verify FK alignment: compare calibrated FK against simulation EE poses.
 
 Loads (joint_pos, ee_pose) pairs collected from the Isaac Lab simulator
-(via OctiLab/scripts/sim2real/collect_fk_pairs.py) and compares with our
+(via UWLab/scripts/sim2real/collect_fk_pairs.py) and compares with our
 calibrated forward kinematics.  Both should match within 0.01 mm per
 dimension, verifying sim2real kinematic alignment.
 
-Usage:
-    python test_fk_comparison.py --pairs fk_pairs.npz
-    python test_fk_comparison.py --pairs fk_pairs.npz --threshold 0.05
+Usage (from diffusion_policy repo root):
+    python scripts/sim2real/test_fk_comparison.py --pairs fk_pairs.npz
+    python scripts/sim2real/test_fk_comparison.py --pairs fk_pairs.npz --threshold 0.05
 """
 import click
 import numpy as np
