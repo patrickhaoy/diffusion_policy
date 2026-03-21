@@ -14,7 +14,6 @@ dependencies:
   - numpy=1.23.3
   - numba==0.56.4
   - scipy==1.9.1
-  - py-opencv=4.6.0
   - cffi=1.15.1
   - ipykernel=6.16
   - matplotlib=3.6.1
@@ -62,13 +61,16 @@ dependencies:
     - pytorchvideo==0.1.5
     # requires librealsense https://github.com/IntelRealSense/librealsense/blob/master/doc/distribution_linux.md
     - pyrealsense2==2.51.1.4348
+    - opencv-contrib-python-headless<4.10
+    - open3d==0.19.0
     # requires apt install libspnav-dev spacenavd; systemctl start spacenavd
     - spnav @ https://github.com/cheng-chi/spnav/archive/c1c938ebe3cc542db4685e0d13850ff1abfdb943.tar.gz
-    - ur-rtde==1.5.5
+    - ur-rtde==1.6.2
     - atomics==1.0.2
     # pip package required for jpeg-xl
     - imagecodecs==2022.9.26
     - r3m @ https://github.com/facebookresearch/r3m/archive/b2334e726887fa0206962d7984c69c5fb09cceab.tar.gz
+    - mujoco==2.3.7
     - dm-control==1.0.9
     - pynput==1.7.6
   
