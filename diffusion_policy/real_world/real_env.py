@@ -4,6 +4,7 @@ import numpy as np
 import time
 import shutil
 import math
+from collections import deque
 from multiprocessing.managers import SharedMemoryManager
 from diffusion_policy.real_world.rtde_interpolation_controller import RTDEInterpolationController
 from diffusion_policy.real_world.multi_realsense import MultiRealsense, SingleRealsense
@@ -17,13 +18,13 @@ from diffusion_policy.real_world.multi_camera_visualizer import MultiCameraVisua
 from diffusion_policy.common.replay_buffer import ReplayBuffer
 from diffusion_policy.common.cv2_util import (
     get_image_transform, optimal_row_cols)
+from diffusion_policy.real_world.ur5e_kinematics import axis_angle_to_quat
 
 DEFAULT_OBS_KEY_MAP = {
     # robot
-    'ActualTCPPose': 'robot_eef_pose',
-    'ActualTCPSpeed': 'robot_eef_pose_vel',
-    'ActualQ': 'robot_joint',
-    'ActualQd': 'robot_joint_vel',
+    'ActualQ': 'arm_joint_pos',
+    'ActualTCPPose': 'end_effector_pose',  # EE pose [x,y,z,rx,ry,rz] from robot
+    'ActualTCPForce': 'tcp_force',  # 6D wrench [Fx,Fy,Fz,Tx,Ty,Tz] from F/T sensor
     # timestamps
     'step_idx': 'step_idx',
     'timestamp': 'timestamp'
@@ -41,26 +42,33 @@ class RealEnv:
             obs_image_resolution=(640,480),
             max_obs_buffer_size=30,
             camera_serial_numbers=None,
+            camera_configs=None,
             obs_key_map=DEFAULT_OBS_KEY_MAP,
             obs_float32=False,
             # action
-            max_pos_speed=0.25,
-            max_rot_speed=0.6,
+            rolling_action_buffer=False,
+            action_mode='joint',  # 'joint' or 'cartesian' (direct Cartesian OSC)
             # robot
-            tcp_offset=0.13,
-            init_joints=False,
+            init_joints=True,
+            custom_init_joints=None,  # Custom initial joint positions
+            # OSC parameters
+            osc_kp_pos=1000.0,
+            osc_kp_rot=50.0,
+            osc_damping_ratio_pos=1.0,
+            osc_damping_ratio_rot=1.0,
             # video capture params
             video_capture_fps=30,
-            video_capture_resolution=(1280,720),
+            video_capture_resolution=(640,480),
             # saving params
             record_raw_video=True,
             thread_per_video=2,
             video_crf=21,
             # vis params
             enable_multi_cam_vis=True,
-            multi_cam_vis_resolution=(1280,720),
+            multi_cam_vis_resolution=(640,480),
             # shared memory
-            shm_manager=None
+            shm_manager=None,
+            rescale_pixels=True,
             ):
         assert frequency <= video_capture_fps
         output_dir = pathlib.Path(output_dir)
@@ -84,7 +92,10 @@ class RealEnv:
             bgr_to_rgb=True)
         color_transform = color_tf
         if obs_float32:
-            color_transform = lambda x: color_tf(x).astype(np.float32) / 255
+            if rescale_pixels:
+                color_transform = lambda x: color_tf(x).astype(np.float32) / 255
+            else:
+                color_transform = lambda x: color_tf(x).astype(np.float32)
 
         def transform(data):
             data['color'] = color_transform(data['color'])
@@ -130,6 +141,7 @@ class RealEnv:
             # ignores put_fps
             put_downsample=False,
             record_fps=recording_fps,
+            advanced_mode_config=camera_configs,
             enable_color=True,
             enable_depth=False,
             enable_infrared=False,
@@ -151,29 +163,37 @@ class RealEnv:
             )
 
         cube_diag = np.linalg.norm([1,1,1])
-        j_init = np.array([0,-90,-90,-90,90,0]) / 180 * np.pi
-        if not init_joints:
-            j_init = None
+        
+        # Handle joint initialization
+        j_init = None
+        if init_joints:
+            if custom_init_joints is not None:
+                # Use custom initial joint positions if provided
+                j_init = np.array(custom_init_joints)
+                print(f"Using custom initial joint positions: {j_init}")
+            else:
+                # Use default initial joint positions
+                j_init = np.array([16.85, -79.74, 99.80, -114.68, -91.09, 20.43]) / 180 * np.pi
+                print(f"Using default initial joint positions: {j_init}")
 
         robot = RTDEInterpolationController(
             shm_manager=shm_manager,
             robot_ip=robot_ip,
-            frequency=125, # UR5 CB3 RTDE
-            lookahead_time=0.1,
-            gain=300,
-            max_pos_speed=max_pos_speed*cube_diag,
-            max_rot_speed=max_rot_speed*cube_diag,
+            frequency=500,
             launch_timeout=3,
-            tcp_offset_pose=[0,0,tcp_offset,0,0,0],
-            payload_mass=None,
-            payload_cog=None,
             joints_init=j_init,
             joints_init_speed=1.05,
             soft_real_time=False,
             verbose=False,
             receive_keys=None,
-            get_max_k=max_obs_buffer_size
+            get_max_k=max_obs_buffer_size,
+            # OSC parameters
+            osc_kp_pos=osc_kp_pos,
+            osc_kp_rot=osc_kp_rot,
+            osc_damping_ratio_pos=osc_damping_ratio_pos,
+            osc_damping_ratio_rot=osc_damping_ratio_rot,
             )
+
         self.realsense = realsense
         self.robot = robot
         self.multi_cam_vis = multi_cam_vis
@@ -181,9 +201,8 @@ class RealEnv:
         self.frequency = frequency
         self.n_obs_steps = n_obs_steps
         self.max_obs_buffer_size = max_obs_buffer_size
-        self.max_pos_speed = max_pos_speed
-        self.max_rot_speed = max_rot_speed
         self.obs_key_map = obs_key_map
+        self.action_mode = action_mode
         # recording
         self.output_dir = output_dir
         self.video_dir = video_dir
@@ -194,6 +213,9 @@ class RealEnv:
         self.obs_accumulator = None
         self.action_accumulator = None
         self.stage_accumulator = None
+
+        # No-timestamp action buffer
+        rolling_action_buffer = self.action_buffer = deque(maxlen=self.n_obs_steps) if rolling_action_buffer else None
 
         self.start_time = None
     
@@ -271,8 +293,13 @@ class RealEnv:
                     this_idx = is_before_idxs[-1]
                 this_idxs.append(this_idx)
             # remap key
-            camera_obs[f'camera_{camera_idx}'] = value['color'][this_idxs]
-
+            if camera_idx == 0:
+                camera_obs[f'front_rgb'] = value['color'][this_idxs]
+            elif camera_idx == 1:
+                camera_obs[f'side_rgb'] = value['color'][this_idxs]
+            else:
+                camera_obs[f'wrist_rgb'] = value['color'][this_idxs]
+        
         # align robot obs
         robot_timestamps = last_robot_data['robot_receive_timestamp']
         this_timestamps = robot_timestamps
@@ -300,16 +327,58 @@ class RealEnv:
                 robot_timestamps
             )
 
+        # last_arm_action / last_gripper_action: from action buffer (pre-scale when exec_actions called with obs_actions)
+        last_actions = dict()
+        if self.action_buffer is not None and len(self.action_buffer) > 0:
+            last_actions_raw = np.zeros((self.n_obs_steps, 7), dtype=np.float32)
+            actions = np.array(self.action_buffer)
+
+            # overlay the buffer in
+            last_actions_raw[:actions.shape[0], :] = actions
+
+            last_actions = {
+                'last_arm_action': last_actions_raw[:,:6],
+                'last_gripper_action': last_actions_raw[:,6:7] 
+            }
+        else:
+            # values = self.robot.get_state()['ActualQ']
+            values = np.zeros(7)
+            obs_array = np.tile(values, (self.n_obs_steps, 1))
+            last_actions = {
+                'last_arm_action': obs_array[:,:6],
+                'last_gripper_action': np.zeros((self.n_obs_steps, 1))
+            }
+        
         # return obs
         obs_data = dict(camera_obs)
         obs_data.update(robot_obs)
+        obs_data.update(last_actions)
         obs_data['timestamp'] = obs_align_timestamps
         return obs_data
     
     def exec_actions(self, 
             actions: np.ndarray, 
             timestamps: np.ndarray, 
-            stages: Optional[np.ndarray]=None):
+            stages: Optional[np.ndarray]=None,
+            obs_actions: Optional[np.ndarray]=None):
+        """
+        Execute unified robot actions using OSC torque control.
+
+        last_arm_action / last_gripper_action in get_obs() come from the action buffer.
+        If obs_actions is provided, that (raw/pre-scale) is stored in the buffer and used
+        for recording; otherwise actions is stored.
+
+        Args:
+            actions: Unified robot actions (shape: N x 7) to execute:
+                - action_mode='joint':  actions[:, :6] = target joint positions (rad)
+                - action_mode='cartesian': actions[:, :6] = absolute EE target
+                    [px, py, pz, ax, ay, az] (position + axis-angle orientation)
+                - actions[:, 6] = Gripper position (<0=closed, >=0=open)
+            timestamps: Action timestamps
+            stages: Optional stage information
+            obs_actions: Optional (shape: N x 7). If set, stored in action buffer and
+                accumulators so last_arm_action in obs is pre-scale; actions are still executed.
+        """
         assert self.is_ready
         if not isinstance(actions, np.ndarray):
             actions = np.array(actions)
@@ -320,24 +389,55 @@ class RealEnv:
         elif not isinstance(stages, np.ndarray):
             stages = np.array(stages, dtype=np.int64)
 
-        # convert action to pose
+        # Validate action shape
+        if actions.shape[-1] != 7:
+            raise ValueError(f"Actions must have 7 dimensions (6 arm + 1 gripper), got shape {actions.shape}")
+        
+        # Separate arm and gripper actions
+        arm_actions = actions[:, :6]
+        # Convert gripper action: <0 is closed, >=0 is open
+        gripper_actions = actions[:, 6:7] < 0
+
+        # Filter to future actions only
         receive_time = time.time()
         is_new = timestamps > receive_time
+        new_arm_actions = arm_actions[is_new]
+        new_gripper_actions = gripper_actions[is_new]
         new_actions = actions[is_new]
         new_timestamps = timestamps[is_new]
         new_stages = stages[is_new]
 
-        # schedule waypoints
-        for i in range(len(new_actions)):
-            self.robot.schedule_waypoint(
-                pose=new_actions[i],
-                target_time=new_timestamps[i]
-            )
+        # Execute actions via OSC
+        for i in range(len(new_arm_actions)):
+            if self.action_mode == 'cartesian':
+                target_pos = new_arm_actions[i, :3]
+                target_quat = axis_angle_to_quat(new_arm_actions[i, 3:6])
+                self.robot.cartesian_osc_control(
+                    target_pos=target_pos,
+                    target_quat=target_quat,
+                    close_gripper=new_gripper_actions[i]
+                )
+            else:
+                self.robot.joint_torque_control(
+                    target_joints=new_arm_actions[i],
+                    close_gripper=new_gripper_actions[i]
+                )
         
-        # record actions
+        # Store pre-scale (obs_actions) in buffer/accumulators when provided
+        to_store = new_actions
+        if obs_actions is not None:
+            obs_actions = np.array(obs_actions)
+            if obs_actions.shape[-1] != 7:
+                raise ValueError(f"obs_actions must have 7 dimensions, got shape {obs_actions.shape}")
+            if obs_actions.shape[0] == actions.shape[0]:
+                to_store = obs_actions[is_new]
+            else:
+                to_store = obs_actions[-len(new_actions):]
+            assert len(to_store) == len(new_actions), "obs_actions length must match executed actions"
+
         if self.action_accumulator is not None:
             self.action_accumulator.put(
-                new_actions,
+                to_store,
                 new_timestamps
             )
         if self.stage_accumulator is not None:
@@ -345,7 +445,10 @@ class RealEnv:
                 new_stages,
                 new_timestamps
             )
-    
+        if self.action_buffer is not None:
+            for action in to_store:
+                self.action_buffer.append(action)
+
     def get_robot_state(self):
         return self.robot.get_state()
 

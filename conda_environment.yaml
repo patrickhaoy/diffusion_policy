@@ -7,9 +7,6 @@ channels:
 dependencies:
   - python=3.9
   - pip=22.2.2
-  - cudatoolkit=11.6
-  - pytorch=1.12.1
-  - torchvision=0.13.1
   - pytorch3d=0.7.0
   - numpy=1.23.3
   - numba==0.56.4
@@ -46,11 +43,15 @@ dependencies:
   - diffusers=0.11.1
   - av=10.0.0
   - cmake=3.24.3
+  - huggingface_hub==0.16.4
   # trick to avoid cpu affinity issue described in https://github.com/pytorch/pytorch/issues/99625
   - llvm-openmp=14
   # trick to force reinstall imagecodecs via pip
   - imagecodecs==2022.8.8
   - pip:
+    # Install with: pip install torch==2.4.0 torchvision==0.19.0 --index-url https://download.pytorch.org/whl/cu121
+    - torch==2.4.0
+    - torchvision==0.19.0
     - ray[default,tune]==2.2.0
     # requires mujoco py dependencies libosmesa6-dev libgl1-mesa-glx libglfw3 patchelf
     - free-mujoco-py==2.1.6
@@ -62,4 +63,5 @@ dependencies:
     # pip package required for jpeg-xl
     - imagecodecs==2022.9.26
     - r3m @ https://github.com/facebookresearch/r3m/archive/b2334e726887fa0206962d7984c69c5fb09cceab.tar.gz
+    - mujoco==2.3.7
     - dm-control==1.0.9

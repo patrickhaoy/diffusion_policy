@@ -4,6 +4,7 @@ wandb
 outputs
 data
 data_local
+demo
 .vscode
 _wandb
 
@@ -138,3 +139,6 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# checkpoints
+*.pt

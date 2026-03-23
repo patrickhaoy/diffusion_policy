@@ -18,7 +18,8 @@ import random
 import wandb
 import tqdm
 import numpy as np
-import shutil
+from accelerate import Accelerator
+from accelerate import DistributedDataParallelKwargs
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
 from diffusion_policy.policy.diffusion_transformer_hybrid_image_policy import DiffusionTransformerHybridImagePolicy
 from diffusion_policy.dataset.base_dataset import BaseImageDataset
@@ -56,6 +57,16 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
         # configure training state
         self.global_step = 0
         self.epoch = 0
+
+        # accelerator
+        ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+        self.accelerator = Accelerator(
+            # mixed_precision=cfg.training.mixed_precision,
+            kwargs_handlers=[ddp_kwargs]
+        )
+        # do not save optimizer if resume=False
+        if not cfg.training.resume:
+            self.exclude_keys = ['optimizer']
 
     def run(self):
         cfg = copy.deepcopy(self.cfg)
@@ -110,30 +121,37 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
         assert isinstance(env_runner, BaseImageRunner)
 
         # configure logging
-        wandb_run = wandb.init(
-            dir=str(self.output_dir),
-            config=OmegaConf.to_container(cfg, resolve=True),
-            **cfg.logging
-        )
-        wandb.config.update(
-            {
-                "output_dir": self.output_dir,
-            }
-        )
+        if self.accelerator.is_main_process:
+            wandb_run = wandb.init(
+                dir=str(self.output_dir),
+                config=OmegaConf.to_container(cfg, resolve=True),
+                **cfg.logging
+            )
+            wandb.config.update(
+                {
+                    "output_dir": self.output_dir,
+                },
+                allow_val_change=True
+            )
 
         # configure checkpoint
         topk_manager = TopKCheckpointManager(
             save_dir=os.path.join(self.output_dir, 'checkpoints'),
             **cfg.checkpoint.topk
         )
-
-        # device transfer
-        device = torch.device(cfg.training.device)
-        self.model.to(device)
+        # accelerator prepare
+        train_dataloader, val_dataloader, self.model, self.optimizer, \
+            lr_scheduler = self.accelerator.prepare(
+                train_dataloader,
+                val_dataloader,
+                self.model,
+                self.optimizer,
+                lr_scheduler
+            )
+        device = self.accelerator.device
         if self.ema_model is not None:
             self.ema_model.to(device)
         optimizer_to(self.optimizer, device)
-        
         # save batch for sampling
         train_sampling_batch = None
 
@@ -162,9 +180,11 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
                             train_sampling_batch = batch
 
                         # compute loss
-                        raw_loss = self.model.compute_loss(batch)
+                        raw_loss = self.accelerator.unwrap_model(
+                            self.model
+                        ).compute_loss(batch)
                         loss = raw_loss / cfg.training.gradient_accumulate_every
-                        loss.backward()
+                        self.accelerator.backward(loss)
 
                         # step optimizer
                         if self.global_step % cfg.training.gradient_accumulate_every == 0:
@@ -174,8 +194,9 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
                         
                         # update ema
                         if cfg.training.use_ema:
-                            ema.step(self.model)
-
+                            ema.step(
+                                self.accelerator.unwrap_model(self.model)
+                            )
                         # logging
                         raw_loss_cpu = raw_loss.item()
                         tepoch.set_postfix(loss=raw_loss_cpu, refresh=False)
@@ -189,9 +210,14 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
 
                         is_last_batch = (batch_idx == (len(train_dataloader)-1))
                         if not is_last_batch:
-                            # log of last step is combined with validation and rollout
-                            wandb_run.log(step_log, step=self.global_step)
-                            json_logger.log(step_log)
+                            if self.accelerator.is_main_process:
+                                wandb_run.log(
+                                    step_log,
+                                    step=self.global_step
+                                )
+                                json_logger.log(
+                                    step_log
+                                )
                             self.global_step += 1
 
                         if (cfg.training.max_train_steps is not None) \
@@ -204,7 +230,7 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
                 step_log['train_loss'] = train_loss
 
                 # ========= eval for this epoch ==========
-                policy = self.model
+                policy = self.accelerator.unwrap_model(self.model)
                 if cfg.training.use_ema:
                     policy = self.ema_model
                 policy.eval()
@@ -223,7 +249,9 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
                                 leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                             for batch_idx, batch in enumerate(tepoch):
                                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                                loss = self.model.compute_loss(batch)
+                                loss = self.accelerator.unwrap_model(
+                                    self.model
+                                ).compute_loss(batch)
                                 val_losses.append(loss)
                                 if (cfg.training.max_val_steps is not None) \
                                     and batch_idx >= (cfg.training.max_val_steps-1):
@@ -277,11 +305,12 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
                 policy.train()
 
                 # end of epoch
-                # log of last step is combined with validation and rollout
-                wandb_run.log(step_log, step=self.global_step)
-                json_logger.log(step_log)
+                if self.accelerator.is_main_process:
+                    wandb_run.log(step_log, step=self.global_step)
+                    json_logger.log(step_log)
                 self.global_step += 1
                 self.epoch += 1
+        self.accelerator.end_training()
 
 @hydra.main(
     version_base=None,
