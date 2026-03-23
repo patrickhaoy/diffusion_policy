@@ -2,6 +2,8 @@
 Usage:
 Training:
 python train.py --config-name=train_diffusion_lowdim_workspace
+python train.py --config-name=train_diffusion_lowdim_workspace \
+    output_dir=/path/to/output
 """
 
 import sys
@@ -20,7 +22,7 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
 @hydra.main(
     version_base=None,
     config_path=str(pathlib.Path(__file__).parent.joinpath(
-        'diffusion_policy','config'))
+        'diffusion_policy', 'config'))
 )
 def main(cfg: OmegaConf):
     # resolve immediately so all the ${now:} resolvers
@@ -28,8 +30,9 @@ def main(cfg: OmegaConf):
     OmegaConf.resolve(cfg)
 
     cls = hydra.utils.get_class(cfg._target_)
-    workspace: BaseWorkspace = cls(cfg)
+    workspace: BaseWorkspace = cls(cfg, output_dir=cfg.output_dir)
     workspace.run()
+
 
 if __name__ == "__main__":
     main()

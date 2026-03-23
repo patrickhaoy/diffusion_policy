@@ -1,4 +1,59 @@
-# Diffusion Policy
+# OmniReset: Diffusion Policy Fork for UR5e/UR7e Sim2Real
+
+This is a fork of [Diffusion Policy](https://diffusion-policy.cs.columbia.edu/) used with [OmniReset](https://omnireset.github.io/) for sim-to-real transfer on UR5e/UR7e + Robotiq 2F-85. It adds:
+
+- **ResNet18-MLP Gaussian head policy** for vision-based control
+- **Real-robot control** via RTDE + OSC for UR5e/UR7e with Robotiq 2F-85 gripper
+- **Mello teleop** for demonstration collection and verification
+- **Camera calibration** scripts for Intel RealSense D415/D435/D455
+- **System identification** data collection (chirp trajectories)
+
+## Quick Start
+
+```bash
+git clone -b omnireset https://github.com/patrickhaoy/diffusion_policy.git
+cd diffusion_policy
+mamba env create -f conda_environment_real.yaml
+conda activate robodiff
+pip install -e .
+```
+
+### Teleop / record demos
+
+```bash
+python demo_real_robot.py -o data/demos --robot_ip 192.168.1.10
+```
+
+### Train vision policy
+
+```bash
+python train.py \
+    --config-name train_mlp_sim2real_image_with_aux_loss_workspace.yaml \
+    --config-dir diffusion_policy/config \
+    task.dataset.dataset_dir=data/dataset.zarr
+```
+
+### Deploy on real robot
+
+```bash
+python eval_real_robot.py \
+    -i data/outputs/.../latest.ckpt \
+    -o data/eval \
+    --robot_ip 192.168.1.10 -j
+```
+
+## Documentation
+
+- **UR5e/UR7e hardware setup** — [README_ur5e.md](README_ur5e.md)
+- **Full sim2real pipeline** (camera calibration, sysid, RL finetuning, distillation, deployment) — [OmniReset Sim2Real docs](https://uw-lab.github.io/UWLab/main/source/publications/omnireset/index.html)
+
+---
+
+# Diffusion Policy (Original README)
+
+Everything below is the original Diffusion Policy README by Chi et al.
+
+---
 
 [[Project page]](https://diffusion-policy.cs.columbia.edu/)
 [[Paper]](https://diffusion-policy.cs.columbia.edu/#paper)
@@ -39,21 +94,21 @@ Within each experiment directory you may find:
 .
 ├── config.yaml
 ├── metrics
-│   └── logs.json.txt
+│   └── logs.json.txt
 ├── train_0
-│   ├── checkpoints
-│   │   ├── epoch=0300-test_mean_score=1.000.ckpt
-│   │   └── latest.ckpt
-│   └── logs.json.txt
+│   ├── checkpoints
+│   │   ├── epoch=0300-test_mean_score=1.000.ckpt
+│   │   └── latest.ckpt
+│   └── logs.json.txt
 ├── train_1
-│   ├── checkpoints
-│   │   ├── epoch=0250-test_mean_score=1.000.ckpt
-│   │   └── latest.ckpt
-│   └── logs.json.txt
+│   ├── checkpoints
+│   │   ├── epoch=0250-test_mean_score=1.000.ckpt
+│   │   └── latest.ckpt
+│   └── logs.json.txt
 └── train_2
     ├── checkpoints
-    │   ├── epoch=0250-test_mean_score=1.000.ckpt
-    │   └── latest.ckpt
+    │   ├── epoch=0250-test_mean_score=1.000.ckpt
+    │   └── latest.ckpt
     └── logs.json.txt
 ```
 The `metrics/logs.json.txt` file aggregates evaluation metrics from all 3 training runs every 50 epochs using `multirun_metrics.py`. The numbers reported in the paper correspond to `max` and `k_min_train_loss` aggregation keys.
