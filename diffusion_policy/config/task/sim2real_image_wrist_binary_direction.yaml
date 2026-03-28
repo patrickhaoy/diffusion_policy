@@ -1,4 +1,4 @@
-name: sim2real_image_finger_friction
+name: sim2real_image_wrist_binary_direction
 
 shape_meta: &shape_meta
   obs:
@@ -20,10 +20,10 @@ shape_meta: &shape_meta
     last_gripper_action:
       shape: [1]
       type: low_dim
-    right_finger_friction:
-      shape: [3]
+    end_effector_force_binary:
+      shape: [1]
       type: low_dim
-    left_finger_friction:
+    end_effector_force_direction:
       shape: [3]
       type: low_dim
   action:
@@ -39,7 +39,7 @@ shape_meta: &shape_meta
       shape: [6]
       type: low_dim
 
-task_name: &task_name sim2real_image_finger_friction
+task_name: &task_name sim2real_image_wrist_binary_direction
 
 env_runner:
   _target_: diffusion_policy.env_runner.dummy_runner.DummyRunner

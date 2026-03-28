@@ -1,16 +1,18 @@
 #!/bin/bash
 set -e
 
-DATASET=${1:?Usage: ./scripts/launch_ablations.sh <dataset_dir>}
+DATASET=${1:?Usage: ./scripts/launch_ablations.sh <dataset_dir> [tag]}
+TAG=${2:-""}
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 TASKS=(
     sim2real_image
-    sim2real_image_wrist_force
-    sim2real_image_wrist_wrench
-    sim2real_image_finger_ly
-    sim2real_image_finger_full
-    sim2real_image_finger_friction
+    sim2real_image_wrist_binary
+    sim2real_image_wrist_per_axis_binary
+    sim2real_image_wrist_binary_direction
+    sim2real_image_tactile_binary
+    sim2real_image_tactile_per_axis_binary
+    sim2real_image_tactile_binary_direction
 )
 
 mkdir -p slurm_logs
@@ -20,8 +22,12 @@ echo "Dataset: $DATASET"
 echo ""
 
 for task in "${TASKS[@]}"; do
-    job_id=$(sbatch --parsable "$SCRIPT_DIR/sbatch_tillicum.sh" "$task" "$DATASET" "$task")
-    echo "  Submitted $task -> job $job_id"
+    exp_name="${task}"
+    if [ -n "$TAG" ]; then
+        exp_name="${task}_${TAG}"
+    fi
+    job_id=$(sbatch --parsable "$SCRIPT_DIR/sbatch_tillicum.sh" "$task" "$DATASET" "$exp_name")
+    echo "  Submitted $exp_name -> job $job_id"
 done
 
 echo ""

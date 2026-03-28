@@ -1,4 +1,4 @@
-name: sim2real_image_finger_ly
+name: sim2real_image_tactile_per_axis_binary
 
 shape_meta: &shape_meta
   obs:
@@ -20,11 +20,11 @@ shape_meta: &shape_meta
     last_gripper_action:
       shape: [1]
       type: low_dim
-    right_finger_force_y:
-      shape: [1]
+    right_finger_contact_per_axis_binary:
+      shape: [3]
       type: low_dim
-    left_finger_force_y:
-      shape: [1]
+    left_finger_contact_per_axis_binary:
+      shape: [3]
       type: low_dim
   action:
     shape: [7]
@@ -39,7 +39,7 @@ shape_meta: &shape_meta
       shape: [6]
       type: low_dim
 
-task_name: &task_name sim2real_image_finger_ly
+task_name: &task_name sim2real_image_tactile_per_axis_binary
 
 env_runner:
   _target_: diffusion_policy.env_runner.dummy_runner.DummyRunner

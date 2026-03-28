@@ -1,4 +1,4 @@
-name: sim2real_image_wrist_wrench
+name: sim2real_image_wrist_binary
 
 shape_meta: &shape_meta
   obs:
@@ -20,8 +20,8 @@ shape_meta: &shape_meta
     last_gripper_action:
       shape: [1]
       type: low_dim
-    end_effector_wrench:
-      shape: [6]
+    end_effector_force_binary:
+      shape: [1]
       type: low_dim
   action:
     shape: [7]
@@ -36,7 +36,7 @@ shape_meta: &shape_meta
       shape: [6]
       type: low_dim
 
-task_name: &task_name sim2real_image_wrist_wrench
+task_name: &task_name sim2real_image_wrist_binary
 
 env_runner:
   _target_: diffusion_policy.env_runner.dummy_runner.DummyRunner

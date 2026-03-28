@@ -1,4 +1,4 @@
-name: sim2real_image_wrist_force
+name: sim2real_image_tactile_binary_direction
 
 shape_meta: &shape_meta
   obs:
@@ -20,7 +20,16 @@ shape_meta: &shape_meta
     last_gripper_action:
       shape: [1]
       type: low_dim
-    end_effector_force:
+    right_finger_contact_binary:
+      shape: [1]
+      type: low_dim
+    right_finger_contact_direction:
+      shape: [3]
+      type: low_dim
+    left_finger_contact_binary:
+      shape: [1]
+      type: low_dim
+    left_finger_contact_direction:
       shape: [3]
       type: low_dim
   action:
@@ -36,7 +45,7 @@ shape_meta: &shape_meta
       shape: [6]
       type: low_dim
 
-task_name: &task_name sim2real_image_wrist_force
+task_name: &task_name sim2real_image_tactile_binary_direction
 
 env_runner:
   _target_: diffusion_policy.env_runner.dummy_runner.DummyRunner
