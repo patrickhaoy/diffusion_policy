@@ -1,9 +1,9 @@
 defaults:
   - _self_
-  - task: sim2real_image
+  - task: sim2real_lowdim_aux
 
-name: train_mlp_image_aux
-_target_: diffusion_policy.workspace.train_mlp_image_workspace.TrainMLPImageWorkspace
+name: train_mlp_lowdim
+_target_: diffusion_policy.workspace.train_mlp_lowdim_workspace.TrainMLPLowdimWorkspace
 output_dir: null
 
 task_name: ${task.name}
@@ -21,39 +21,17 @@ obs_as_global_cond: True
 action_norm_mode: gaussian
 
 policy:
-  _target_: diffusion_policy.policy.mlp_image_policy.MLPImagePolicy
+  _target_: diffusion_policy.policy.mlp_lowdim_policy.MLPLowdimPolicy
   shape_meta: ${shape_meta}
-  obs_encoder:
-    _target_: diffusion_policy.model.vision.multi_image_obs_encoder.MultiImageObsEncoder
-    shape_meta: ${shape_meta}
-    rgb_model:
-      _target_: diffusion_policy.model.vision.model_getter.get_resnet
-      name: resnet18
-      weights: IMAGENET1K_V1
-    resize_shape: null
-    crop_shape: null
-    random_crop: False
-    use_group_norm: True
-    share_rgb_model: False
-    imagenet_norm: True
-    extra_randomizations:
-      - name: ColorJitter
-        params: {brightness: 0.1, contrast: 0.1, saturation: 0.1, hue: 0.05}
-      - name: GaussianBlur
-        params: {kernel_size: 5, sigma: [0.1, 2.0]}
-      - name: RandomGrayscale
-        params: {p: 0.05}
-      - name: GaussianNoise
-        params: {std: 0.01}
   horizon: ${horizon}
   n_action_steps: ${n_action_steps}
   n_obs_steps: ${n_obs_steps}
   hidden_dim: 512
   hidden_depth: 4
-  aux_loss_weight: 1.0
+  aux_loss_weight: 0.0
 
 dataloader:
-  batch_size: 64
+  batch_size: 256
   num_workers: 8
   shuffle: True
   pin_memory: True
@@ -62,7 +40,7 @@ dataloader:
   drop_last: True
 
 val_dataloader:
-  batch_size: 64
+  batch_size: 256
   num_workers: 8
   shuffle: False
   pin_memory: True
@@ -88,7 +66,6 @@ training:
   gradient_accumulate_every: 1
   gradient_clip_norm: 1.0
   use_ema: False
-  freeze_encoder: False
   rollout_every: 5000
   checkpoint_every: 10000
   val_every: 1
@@ -99,7 +76,7 @@ training:
   tqdm_interval_sec: 1.0
 
 logging:
-  project: diffusion_policy_sim2real_image
+  project: diffusion_policy_sim2real_lowdim
   resume: True
   mode: online
   name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}

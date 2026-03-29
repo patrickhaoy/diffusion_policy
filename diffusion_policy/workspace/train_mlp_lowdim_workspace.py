@@ -22,54 +22,46 @@ from accelerate import Accelerator
 from accelerate import DistributedDataParallelKwargs
 
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
-from diffusion_policy.policy.mlp_image_policy import MLPImagePolicy
+from diffusion_policy.policy.mlp_lowdim_policy import MLPLowdimPolicy
 from diffusion_policy.dataset.base_dataset import BaseImageDataset
 from diffusion_policy.env_runner.base_image_runner import BaseImageRunner
-# from diffusion_policy.common.checkpoint_util import TopKCheckpointManager
 from diffusion_policy.common.json_logger import JsonLogger
 from diffusion_policy.common.pytorch_util import dict_apply, optimizer_to
 from diffusion_policy.model.common.lr_scheduler import get_scheduler
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
-class TrainMLPImageWorkspace(BaseWorkspace):
+class TrainMLPLowdimWorkspace(BaseWorkspace):
     include_keys = ['global_step', 'epoch', 'last_checkpoint_step']
 
     def __init__(self, cfg: OmegaConf, output_dir=None):
         super().__init__(cfg, output_dir=output_dir)
 
-        # set seed
         seed = cfg.training.seed
         torch.manual_seed(seed)
         np.random.seed(seed)
         random.seed(seed)
 
-        # configure model
-        self.model: MLPImagePolicy = (
+        self.model: MLPLowdimPolicy = (
             hydra.utils.instantiate(cfg.policy))
 
-        # configure training state
         self.optimizer = hydra.utils.instantiate(
             cfg.optimizer, params=self.model.parameters())
 
-        # configure training state
         self.global_step = 0
         self.epoch = 0
-        self.last_checkpoint_step = 0  # Track last checkpoint step
+        self.last_checkpoint_step = 0
 
-        # accelerator
         ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
         self.accelerator = Accelerator(
             kwargs_handlers=[ddp_kwargs],
         )
-        # do not save optimizer if resume=False
         if not cfg.training.resume:
             self.exclude_keys = ['optimizer']
 
     def run(self):
         cfg = copy.deepcopy(self.cfg)
 
-        # resume training
         checkpoint_loaded = False
         if cfg.training.resume:
             lastest_ckpt_path = self.get_checkpoint_path()
@@ -78,20 +70,17 @@ class TrainMLPImageWorkspace(BaseWorkspace):
                 self.load_checkpoint(path=lastest_ckpt_path)
                 checkpoint_loaded = True
 
-        # configure dataset
         dataset: BaseImageDataset
         dataset = hydra.utils.instantiate(cfg.task.dataset)
         assert isinstance(dataset, BaseImageDataset)
 
-        # Use weighted sampler if available (for multi-dataset with sampling ratios)
         dataloader_kwargs = dict(cfg.dataloader)
         if hasattr(dataset, 'weighted_sampler') and dataset.weighted_sampler is not None:
             dataloader_kwargs['sampler'] = dataset.weighted_sampler
-            dataloader_kwargs.pop('shuffle', None)  # Remove shuffle when using custom sampler
+            dataloader_kwargs.pop('shuffle', None)
 
         train_dataloader = DataLoader(dataset, **dataloader_kwargs)
 
-        # Only recompute normalizer if checkpoint wasn't loaded or normalizer is empty
         if checkpoint_loaded and len(self.model.normalizer.params_dict) > 0:
             print("Checkpoint loaded with normalizer - preserving existing normalizer statistics")
             normalizer = self.model.normalizer
@@ -100,11 +89,9 @@ class TrainMLPImageWorkspace(BaseWorkspace):
             normalizer = dataset.get_normalizer()
             self.model.set_normalizer(normalizer)
 
-        # configure validation dataset
         val_dataset = dataset.get_validation_dataset()
         val_dataloader = DataLoader(val_dataset, **cfg.val_dataloader)
 
-        # configure lr scheduler
         lr_scheduler = get_scheduler(
             cfg.training.lr_scheduler,
             optimizer=self.optimizer,
@@ -115,14 +102,12 @@ class TrainMLPImageWorkspace(BaseWorkspace):
             last_epoch=self.global_step-1
         )
 
-        # configure env
         env_runner: BaseImageRunner
         env_runner = hydra.utils.instantiate(
             cfg.task.env_runner,
             output_dir=self.output_dir)
         assert isinstance(env_runner, BaseImageRunner)
 
-        # configure logging
         if self.accelerator.is_main_process:
             wandb_run = wandb.init(
                 dir=str(self.output_dir),
@@ -136,15 +121,12 @@ class TrainMLPImageWorkspace(BaseWorkspace):
                 allow_val_change=True
             )
 
-        # configure checkpoint
-        # accelerator prepare
         train_dataloader, val_dataloader, self.model, self.optimizer, lr_scheduler = self.accelerator.prepare(
             train_dataloader, val_dataloader, self.model, self.optimizer, lr_scheduler
         )
         device = self.accelerator.device
         optimizer_to(self.optimizer, device)
 
-        # save batch for sampling
         train_sampling_batch = None
 
         if cfg.training.debug:
@@ -156,25 +138,18 @@ class TrainMLPImageWorkspace(BaseWorkspace):
             cfg.training.val_every = 1
             cfg.training.sample_every = 1
 
-        # training loop
         log_path = os.path.join(self.output_dir, 'logs.json.txt')
         with JsonLogger(log_path) as json_logger:
             for local_epoch_idx in range(cfg.training.num_epochs):
                 step_log = dict()
-                # ========= train for this epoch ==========
-                if cfg.training.freeze_encoder:
-                    self.accelerator.unwrap_model(self.model).obs_encoder.eval()
-                    self.accelerator.unwrap_model(self.model).obs_encoder.requires_grad_(False)
 
                 train_losses = list()
                 with tqdm.tqdm(train_dataloader, desc=f"Training epoch {self.epoch}", leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                     for batch_idx, batch in enumerate(tepoch):
-                        # device transfer
                         batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
                         if train_sampling_batch is None:
                             train_sampling_batch = batch
 
-                        # compute loss
                         loss_output = self.accelerator.unwrap_model(self.model).compute_loss(batch)
                         if isinstance(loss_output, dict):
                             raw_loss = loss_output['loss']
@@ -212,7 +187,6 @@ class TrainMLPImageWorkspace(BaseWorkspace):
                                 json_logger.log(step_log)
                             self.global_step += 1
 
-                            # checkpoint based on gradient steps - check right after step increment
                             next_checkpoint_step = self.last_checkpoint_step + cfg.training.checkpoint_every
                             if self.global_step >= next_checkpoint_step and self.accelerator.is_main_process:
                                 print(f"Saving checkpoint at step {self.global_step} (target was {next_checkpoint_step})")
@@ -223,14 +197,12 @@ class TrainMLPImageWorkspace(BaseWorkspace):
                                 if cfg.checkpoint.save_last_snapshot:
                                     self.save_snapshot()
 
-                                # Save checkpoint for this step
                                 step_ckpt_path = os.path.join(self.output_dir, 'checkpoints', f'step_{self.global_step:07d}.ckpt')
                                 os.makedirs(os.path.dirname(step_ckpt_path), exist_ok=True)
                                 self.save_checkpoint(path=step_ckpt_path)
                                 self.model = model_ddp
                                 self.model.train()
 
-                                # Update last checkpoint step
                                 self.last_checkpoint_step = self.global_step
 
                             # Step-based validation and sampling
@@ -309,20 +281,15 @@ class TrainMLPImageWorkspace(BaseWorkspace):
                             and batch_idx >= (cfg.training.max_train_steps-1):
                             break
 
-                # at the end of each epoch
-                # replace train_loss with epoch average
                 train_loss = np.mean(train_losses)
                 step_log['train_loss'] = train_loss
                 policy = self.accelerator.unwrap_model(self.model)
                 policy.eval()
 
-                # run rollout
                 if (self.epoch % cfg.training.rollout_every) == 0:
                     runner_log = env_runner.run(policy)
-                    # log all
                     step_log.update(runner_log)
 
-                # run validation
                 if (self.epoch % cfg.training.val_every) == 0:
                     with torch.no_grad():
                         val_losses = list()
@@ -363,10 +330,8 @@ class TrainMLPImageWorkspace(BaseWorkspace):
                             step_log['val_log_std_min'] = np.mean(val_log_std_mins)
                             step_log['val_log_std_max'] = np.mean(val_log_std_maxs)
 
-                # run sampling on a training batch
                 if (self.epoch % cfg.training.sample_every) == 0:
                     with torch.no_grad():
-                        # sample trajectory from training set, and evaluate difference
                         batch = dict_apply(train_sampling_batch, lambda x: x.to(device, non_blocking=True))
                         obs_dict = batch['obs']
                         gt_action = batch['action'][:, policy.n_obs_steps-1]
@@ -395,8 +360,8 @@ class TrainMLPImageWorkspace(BaseWorkspace):
     config_path=str(pathlib.Path(__file__).parent.parent.joinpath("config")), 
     config_name=pathlib.Path(__file__).stem)
 def main(cfg):
-    workspace = TrainMLPImageWorkspace(cfg)
+    workspace = TrainMLPLowdimWorkspace(cfg)
     workspace.run()
 
 if __name__ == "__main__":
-    main() 
+    main()

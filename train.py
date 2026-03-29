@@ -6,7 +6,20 @@ python train.py --config-name=train_diffusion_lowdim_workspace \
     output_dir=/path/to/output
 """
 
+import os
 import sys
+
+# Shared HPC nodes: NumPy/OpenBLAS may spawn one thread per CPU per worker; many
+# DataLoader workers then hits RLIMIT_NPROC and workers die. Override before imports.
+for _k in (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+):
+    os.environ.setdefault(_k, "1")
+
 # use line-buffering for both stdout and stderr
 sys.stdout = open(sys.stdout.fileno(), mode='w', buffering=1)
 sys.stderr = open(sys.stderr.fileno(), mode='w', buffering=1)

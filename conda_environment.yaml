@@ -11,6 +11,7 @@ dependencies:
   - numpy=1.23.3
   - numba==0.56.4
   - scipy==1.9.1
+  - pandas=2.0.3
   - py-opencv=4.6.0
   - cffi=1.15.1
   - ipykernel=6.16
@@ -26,15 +27,16 @@ dependencies:
   - scikit-image=0.19.3
   - gym=0.21.0
   - pymunk=6.2.1
-  - wandb=0.13.3
+  # wandb + protobuf: use pip (below). Old wandb 0.13.x only accepts legacy 40-char API keys;
+  # current W&B keys are longer (e.g. wandb_v1_...). Newer wandb needs protobuf 4+.
   - threadpoolctl=3.1.0
   - shapely=1.8.4
   - cython=0.29.32
   - imageio=2.22.0
   - imageio-ffmpeg=0.4.7
   - termcolor=2.0.1
-  - tensorboard=2.10.1
-  - tensorboardx=2.5.1
+  # tensorboard/tensorboardX: use pip (below). Conda 2.10.x protos break with protobuf 4+;
+  # accelerate -> torch.utils.tensorboard needs matching stack with wandb's protobuf.
   - psutil=5.9.2
   - click=8.0.4
   - boto3=1.24.96
@@ -52,11 +54,19 @@ dependencies:
     # Install with: pip install torch==2.4.0 torchvision==0.19.0 --index-url https://download.pytorch.org/whl/cu121
     - torch==2.4.0
     - torchvision==0.19.0
+    - protobuf>=4.25,<6
+    - wandb>=0.18.0
+    - tensorboard>=2.14
+    - tensorboardX>=2.6
     - ray[default,tune]==2.2.0
     # requires mujoco py dependencies libosmesa6-dev libgl1-mesa-glx libglfw3 patchelf
     - free-mujoco-py==2.1.6
     - pygame==2.1.2
-    - pybullet-svl==3.1.6.4
+    # pybullet-svl builds from source with a parallel thread pool; conda env update often
+    # fails on login nodes with: RuntimeError: can't start new thread. Skip here and install
+    # on a compute/interactive node if you need PyBullet envs, e.g.:
+    #   MAKEFLAGS=-j1 pip install pybullet-svl==3.1.6.4
+    # - pybullet-svl==3.1.6.4
     - robosuite @ https://github.com/cheng-chi/robosuite/archive/277ab9588ad7a4f4b55cf75508b44aa67ec171f0.tar.gz
     - robomimic==0.2.0
     - pytorchvideo==0.1.5

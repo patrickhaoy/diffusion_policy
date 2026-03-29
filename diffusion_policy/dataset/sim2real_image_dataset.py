@@ -130,6 +130,11 @@ class Sim2RealImageDataset(BaseImageDataset):
             k for k in self.replay_buffer.root['data'].keys()
             if k.startswith('expert_action_')]
 
+        # Only sample keys that are actually used
+        sampler_keys = (self.rgb_keys + self.lowdim_keys
+                        + self.auxiliary_keys + self.expert_dist_keys
+                        + ['action'])
+
         # Create key_first_k for performance optimization
         key_first_k = dict()
         if n_obs_steps is not None:
@@ -150,6 +155,7 @@ class Sim2RealImageDataset(BaseImageDataset):
             pad_before=pad_before,
             pad_after=pad_after,
             episode_mask=train_mask,
+            keys=sampler_keys,
             key_first_k=key_first_k)
 
         # Store parameters
@@ -167,6 +173,12 @@ class Sim2RealImageDataset(BaseImageDataset):
     def _create_replay_buffer_from_zarr(
             self, dataset_path, shape_meta, use_cache=False, use_disk=True):
         """Create replay buffer from zarr data with caching and memory options."""
+        # Compute the set of obs keys actually needed from shape_meta
+        needed_obs_keys = list(shape_meta.get('obs', {}).keys())
+        aux_meta = shape_meta.get('auxiliary_obs', None)
+        if aux_meta is not None:
+            needed_obs_keys += list(aux_meta.keys())
+
         replay_buffer = None
 
         if use_cache:
@@ -198,7 +210,8 @@ class Sim2RealImageDataset(BaseImageDataset):
                         print('Cache does not exist. Creating!')
                         # Always load to memory for caching
                         replay_buffer = self._load_zarr_data(
-                            dataset_path, use_disk=False)
+                            dataset_path, use_disk=False,
+                            needed_keys=needed_obs_keys)
                         print('Saving cache to disk.')
                         with zarr.ZipStore(cache_zarr_path) as zip_store:
                             replay_buffer.save_to_store(store=zip_store)
@@ -231,12 +244,18 @@ class Sim2RealImageDataset(BaseImageDataset):
         else:
             # No caching, load directly
             replay_buffer = self._load_zarr_data(
-                dataset_path, use_disk=use_disk)
+                dataset_path, use_disk=use_disk,
+                needed_keys=needed_obs_keys)
 
         return replay_buffer
 
-    def _load_zarr_data(self, dataset_path, use_disk=True):
-        """Load zarr data with disk/memory options"""
+    def _load_zarr_data(self, dataset_path, use_disk=True, needed_keys=None):
+        """Load zarr data with disk/memory options.
+        
+        Args:
+            needed_keys: if provided, only load these obs keys (skip others
+                         like images when training state-only).
+        """
         z = zarr.open(dataset_path, mode='r')
         obs_group = z['data']['obs']
         action_arr = z['data']['actions']
@@ -245,8 +264,10 @@ class Sim2RealImageDataset(BaseImageDataset):
         # Create replay buffer
         replay_buffer = ReplayBuffer.create_empty_numpy()
 
-        # Add observations
-        for key in obs_group.keys():
+        # Add observations (only needed keys if specified)
+        load_keys = obs_group.keys() if needed_keys is None else [
+            k for k in needed_keys if k in obs_group.keys()]
+        for key in load_keys:
             if use_disk:
                 # Keep data on disk (memory mapped)
                 replay_buffer.root['data'][key] = obs_group[key]
