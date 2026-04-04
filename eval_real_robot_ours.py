@@ -187,7 +187,8 @@ def main(input, output, robot_ip, match_dataset, match_episode,
     payload = torch.load(open(ckpt_path, 'rb'), pickle_module=dill)
     cfg = payload['cfg']
     cls = hydra.utils.get_class(cfg._target_)
-    cfg['policy']['obs_encoder']['extra_randomizations'] = []
+    if 'obs_encoder' in cfg.get('policy', {}):
+        cfg['policy']['obs_encoder']['extra_randomizations'] = []
     workspace = cls(cfg)
     workspace: BaseWorkspace
     workspace.load_payload(payload, exclude_keys=None, include_keys=None)
@@ -208,6 +209,8 @@ def main(input, output, robot_ip, match_dataset, match_episode,
     # setup experiments
     dt = 1/frequency
     obs_res = get_real_obs_resolution_ours(cfg['task']['shape_meta'])
+    if obs_res is None:
+        obs_res = (640, 480)
     n_obs_steps = cfg['n_obs_steps']
     n_action_steps = cfg['n_action_steps']
     print("n_obs_steps: ", n_obs_steps)
