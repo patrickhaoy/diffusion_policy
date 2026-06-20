@@ -142,3 +142,12 @@ dmypy.json
 
 # checkpoints
 *.pt
+*.ckpt
+*.ckpt.*
+
+# eval recording outputs
+demo_*/
+tmp/
+
+# data archives
+*.zip

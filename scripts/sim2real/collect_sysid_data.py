@@ -66,6 +66,31 @@ def generate_chirp_trajectory(duration, dt, f0, f1, pos_amp, rot_amp):
     return offsets, t
 
 
+def generate_wrist3_chirp(duration, dt, f0, f1, rot_amp):
+    """1-DOF chirp on tool-local roll (rotation about EE z-axis).
+
+    The wrist_3 joint axis IS the tool-flange z-axis, so a pure roll about EE-z is
+    achieved by wrist_3 alone while the other 5 joints hold their current position.
+
+    Returns:
+        roll: (T,) tool-local roll angle [rad] about EE z over time
+        t: (T,) time array
+    """
+    T = int(duration / dt)
+    t = np.linspace(0, duration, T)
+
+    phase = 2 * np.pi * (f0 * t + (f1 - f0) / (2 * duration) * t ** 2)
+
+    envelope = np.ones(T)
+    ramp_up_n = int(2.0 / dt)
+    ramp_down_n = int(3.0 / dt)
+    envelope[:ramp_up_n] = np.linspace(0, 1, ramp_up_n)
+    envelope[-ramp_down_n:] = np.linspace(1, 0, ramp_down_n)
+
+    roll = rot_amp * envelope * np.sin(phase)
+    return roll, t
+
+
 def quat_multiply(q1, q2):
     w1, x1, y1, z1 = q1
     w2, x2, y2, z2 = q2
@@ -87,13 +112,16 @@ def quat_multiply(q1, q2):
 @click.option('--f1', default=3.0, type=float, help="End frequency (Hz)")
 @click.option('--pos_amp', default=0.10, type=float, help="Position amplitude (meters)")
 @click.option('--rot_amp', default=0.25, type=float, help="Rotation amplitude (radians)")
+@click.option('--wrist3_only', is_flag=True, default=False,
+              help="Isolate wrist_3: 1-DOF chirp as tool-local roll about EE z; other joints hold position. "
+                   "Pair with sysid_ur5e_osc.py --opt_joints wrist_3_joint.")
 @click.option('--kp_pos', default=1000.0, type=float, help="Position stiffness")
 @click.option('--kp_rot', default=50.0, type=float, help="Rotation stiffness")
 @click.option('--damping_ratio', default=1.0, type=float, help="Damping ratio")
 @click.option('--payload_mass', default=None, type=float, help="Override payload mass (kg)")
 @click.option('--payload_cog', default=None, type=str, help="Override payload CoG 'x,y,z' (m)")
 def main(robot_ip, output, joints_init_deg, duration, f0, f1, pos_amp, rot_amp,
-         kp_pos, kp_rot, damping_ratio, payload_mass, payload_cog):
+         wrist3_only, kp_pos, kp_rot, damping_ratio, payload_mass, payload_cog):
     """Collect chirp excitation data for PACE system identification."""
     j_init = np.deg2rad([float(x) for x in joints_init_deg.split(',')])
     assert len(j_init) == 6
@@ -115,19 +143,29 @@ def main(robot_ip, output, joints_init_deg, duration, f0, f1, pos_amp, rot_amp,
         torque_max=torque_max,
     )
 
-    chirp_offsets, chirp_t = generate_chirp_trajectory(
-        duration=duration, dt=dt, f0=f0, f1=f1,
-        pos_amp=pos_amp, rot_amp=rot_amp,
-    )
+    if wrist3_only:
+        wrist3_roll, chirp_t = generate_wrist3_chirp(
+            duration=duration, dt=dt, f0=f0, f1=f1, rot_amp=rot_amp,
+        )
+        chirp_offsets = None
+    else:
+        chirp_offsets, chirp_t = generate_chirp_trajectory(
+            duration=duration, dt=dt, f0=f0, f1=f1,
+            pos_amp=pos_amp, rot_amp=rot_amp,
+        )
+        wrist3_roll = None
     n_steps = len(chirp_t)
 
     kd_diag = 2 * np.sqrt(np.array(motion_stiffness)) * np.array(motion_damping_ratio)
     print("=" * 60)
-    print("Collect Sysid Data — Chirp Excitation")
+    print("Collect Sysid Data — Chirp Excitation" + ("  [wrist_3 only]" if wrist3_only else ""))
     print("=" * 60)
     print(f"Duration:  {duration:.1f}s  ({n_steps} steps at {CONTROL_FREQUENCY}Hz)")
     print(f"Frequency: {f0:.2f} -> {f1:.1f} Hz")
-    print(f"Amplitude: pos={pos_amp*1000:.0f}mm  rot={np.degrees(rot_amp):.1f}deg")
+    if wrist3_only:
+        print(f"Amplitude: tool-roll(wrist_3)={np.degrees(rot_amp):.1f}deg  (other joints hold position)")
+    else:
+        print(f"Amplitude: pos={pos_amp*1000:.0f}mm  rot={np.degrees(rot_amp):.1f}deg")
     print(f"Kp:        {list(motion_stiffness)}")
     print(f"Kd:        [{', '.join(f'{x:.1f}' for x in kd_diag)}]")
     print(f"Output:    {output}")
@@ -174,9 +212,14 @@ def main(robot_ip, output, joints_init_deg, duration, f0, f1, pos_amp, rot_amp,
                 if stop:
                     break
 
-                offset = chirp_offsets[step]
-                target_pos = center_pos + offset[:3]
-                target_quat = quat_multiply(axis_angle_to_quat(offset[3:6]), center_quat)
+                if wrist3_only:
+                    # Tool-local roll about EE z (right-multiply) -> driven by wrist_3 alone.
+                    target_pos = center_pos.copy()
+                    target_quat = quat_multiply(center_quat, axis_angle_to_quat([0.0, 0.0, wrist3_roll[step]]))
+                else:
+                    offset = chirp_offsets[step]
+                    target_pos = center_pos + offset[:3]
+                    target_quat = quat_multiply(axis_angle_to_quat(offset[3:6]), center_quat)
                 osc.set_target(target_pos, target_quat)
 
                 curr_joints = np.array(rtde_r.getActualQ(), dtype=float)
@@ -224,6 +267,7 @@ def main(robot_ip, output, joints_init_deg, duration, f0, f1, pos_amp, rot_amp,
                     "chirp_params": {
                         "duration": duration, "f0": f0, "f1": f1,
                         "pos_amp": pos_amp, "rot_amp": rot_amp,
+                        "wrist3_only": wrist3_only,
                     },
                     "num_waypoints": len(waypoints),
                     "waypoint_step_indices": torch.tensor(

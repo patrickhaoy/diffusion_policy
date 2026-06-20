@@ -354,6 +354,8 @@ class RealEnv:
         obs_data.update(robot_obs)
         obs_data.update(last_actions)
         obs_data['timestamp'] = obs_align_timestamps
+        if self.multi_cam_vis is not None:
+            self.multi_cam_vis.tick()
         return obs_data
     
     def exec_actions(self, 
